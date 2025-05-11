@@ -85,6 +85,7 @@ struct RollingShutterParameters:
         
     
 # GPU Kernel: rasterize gaussians to pixels
+@compiler.register("render")
 fn rasterize_to_pixels_from_world_3dgs_fwd(
     C: Int,
     N: Int,
@@ -122,20 +123,6 @@ fn rasterize_to_pixels_from_world_3dgs_fwd(
     tile_id = block_idx.y * tile_width + block_idx.z
     i = block_idx.y * tile_size + thread_idx.y
     j = block_idx.z * tile_size + thread_idx.x
-
-    # CUDA
-    # tile_offsets += cid * tile_height * tile_width
-    # render_colors += cid * image_height * image_width * CDIM
-    # render_alphas += cid * image_height * image_width
-    # last_ids += cid * image_height * image_width
-    # Mojo
-    # tile_offsets[cid, tile_height, tile_width]
-    # render_colors[cid, image_height, image_width, CDIM]
-    # render_alphas[cid, image_height, image_width, 1]
-    # last_ids[cid, image_height, image_width]
-
-    # backgrounds[cid, CDIM]
-    # masks[cid, tile_height, tile_width]
 
     px = j+0.5
     py = i+0.5
