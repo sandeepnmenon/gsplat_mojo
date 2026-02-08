@@ -2,7 +2,7 @@
 
 3D Gaussian Splatting rendering kernels implemented in [Mojo](https://www.modular.com/mojo), targeting GPU acceleration via Modular's MAX platform.
 
-> **Status:** Work-in-progress. The core rasterization kernel and math utilities are partially implemented. Several functions are incomplete and the code has known compilation errors (see [Current State](#current-state) below).
+> **Status:** Work-in-progress. The core rasterization kernel and math utilities are partially implemented. The code compiles and the GPU kernel launches successfully.
 
 ## Project Structure
 
@@ -63,16 +63,13 @@ The main entry point is in `operations/gsplat_forward.mojo`. It allocates GPU bu
 
 ```bash
 cd gsplat
-magic run mojo run operations/gsplat_forward.mojo
+magic run forward
 ```
 
-### Run individual modules (type-check)
-
-To verify that a module parses/compiles without running it:
+This is a project task defined in `mojoproject.toml` that handles include paths automatically. You can also run it manually:
 
 ```bash
-magic run mojo build vec.mojo
-magic run mojo build utils_t.mojo
+magic run mojo run -I . operations/gsplat_forward.mojo
 ```
 
 ### Format code
@@ -83,14 +80,11 @@ magic run mblack .
 
 ## Current State
 
-The project is in early development. Known issues that prevent a clean build:
+The project is in early development. The kernel compiles and launches on GPU, but the rasterization loop is not yet fully connected:
 
-1. **Module resolution** -- `gsplat_forward.mojo` imports `from vec import ...` and `from utils_t import ...`, but these modules live in the parent directory (`gsplat/`). Running from `operations/` can't resolve them. A package `__init__.mojo` or `-I` include path is needed.
-2. **Undeclared variables** in `gsplat_forward.mojo` -- `xyz_ptr`, `iscl_rot`, `xyz_opac` are used before declaration in the kernel's inner loop (lines ~196-226).
-3. **`RollingShutterParameters`** -- references `self.t_start` before it's assigned in the `__init__` (the field ordering issue on line 79).
-4. **`gaussian_2d()`** in `render.mojo` -- declared but has no body.
-5. **`render.mojo`** kernel signature -- the `rasterize_to_pixels_from_world_3dgs_fwd` in `render.mojo` has a different (simplified) signature than the one in `gsplat_forward.mojo`.
-6. **`vec.mojo`** -- uses `random_Float32` which is not a standard Mojo function; needs to use `random.random_float64` or similar.
+- `render.mojo` contains a simplified version of the kernel with a different signature (used as a `@compiler.register("render")` custom op). Its `gaussian_2d()` function is stubbed out.
+- The inner accumulation loop in `gsplat_forward.mojo` reads gaussian data per-tile but does not yet compute the 2D projection or alpha-composite colors.
+- The PLY loader for `assets/christmas_tree.ply` is not yet implemented.
 
 ## Architecture
 

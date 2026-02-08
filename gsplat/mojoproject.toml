@@ -6,6 +6,7 @@ platforms = ["linux-64"]
 version = "0.1.0"
 
 [tasks]
+forward = "mojo run -I . operations/gsplat_forward.mojo"
 
 [dependencies]
 max = "*"

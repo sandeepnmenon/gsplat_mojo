@@ -64,12 +64,13 @@ struct Render:
         else:
             raise Error("Unsupported target device", target)
 fn gaussian_2d(
-    x: float,
-    y: float,
-    mean_x: float,
-    mean_y: float,
+    x: Float32,
+    y: Float32,
+    mean_x: Float32,
+    mean_y: Float32,
     cov: InputTensor[type = DType.float32, rank=2]
 ):
+    pass
 fn render_gpu(
     img_out: OutputTensor[type = DType.float32, rank=3],
     means: InputTensor[type = DType.float32, rank=2],
