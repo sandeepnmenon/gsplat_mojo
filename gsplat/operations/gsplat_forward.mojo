@@ -63,13 +63,15 @@ fn extract_se3(se3_matrix: LayoutTensor[DTYPE, Layout.row_major(3, 4)]) -> SE3:
     return SE3(rotation=rotation_tensor, translation=translation)
 
 
+alias layoutQuat = Layout.row_major(4, 1)
+
 struct RollingShutterParameters:
     var t_start: Vec3
-    var q_start: LayoutTensor[mut=False, DTYPE, layoutN4, MutableAnyOrigin] 
+    var q_start: LayoutTensor[mut=True, DTYPE, layoutQuat, MutableAnyOrigin]
     var t_end: Vec3
-    var q_end: LayoutTensor[mut=False, DTYPE, layoutN4, MutableAnyOrigin]
+    var q_end: LayoutTensor[mut=True, DTYPE, layoutQuat, MutableAnyOrigin]
 
-    fn __init__(out self,se3_start: LayoutTensor[DType.float32, Layout.row_major(3, 4)],
+    fn __init__(out self, se3_start: LayoutTensor[DType.float32, Layout.row_major(3, 4)],
                       se3_end: LayoutTensor[DType.float32, Layout.row_major(3, 4)]):
         var start = extract_se3(se3_start)
         self.t_start = start.translation
@@ -79,13 +81,12 @@ struct RollingShutterParameters:
             self.t_end = self.t_start
             self.q_end = self.q_start
         else:
-            var end = extract_se3(se3_end)
-            self.t_end = end.translation
-            self.q_end = rotation_matrix_to_quaternion(end.rotation)
+            var end_se3 = extract_se3(se3_end)
+            self.t_end = end_se3.translation
+            self.q_end = rotation_matrix_to_quaternion(end_se3.rotation)
         
     
 # GPU Kernel: rasterize gaussians to pixels
-@compiler.register("render")
 fn rasterize_to_pixels_from_world_3dgs_fwd(
     C: Int,
     N: Int,
@@ -190,45 +191,56 @@ fn rasterize_to_pixels_from_world_3dgs_fwd(
         idx = batch_start + tr
 
         if (idx < range_end):
-            g = flatten_ids[Int(idx)]
+            var g = flatten_ids[Int(idx)]
             id_batch[tr] = g[0]
-            xyz = means[Int(g)]
-            opac = opacities[Int(g)][0]
-            xyz_ptr = xyz_opacity_batch.bitcast[Float32]()
-            xyz_ptr[tr * 4 + 0] = xyz[0]
-            xyz_ptr[tr * 4 + 1] = xyz[1]
-            xyz_ptr[tr * 4 + 2] = xyz[2]
+            var mean_g = means[Int(g)]
+            var opac = opacities[Int(g)][0]
+            var xyz_ptr = xyz_opacity_batch.bitcast[Float32]()
+            xyz_ptr[tr * 4 + 0] = mean_g[0]
+            xyz_ptr[tr * 4 + 1] = mean_g[1]
+            xyz_ptr[tr * 4 + 2] = mean_g[2]
             xyz_ptr[tr * 4 + 3] = opac
 
-            quat = quats[Int(g)]
-            scale = scales[Int(g)]
+            var quat_data = quats[Int(g)]
+            var scale_data = scales[Int(g)]
 
-            R = quat_to_rotmat(quat)
-            S = LayoutTensor[mut=True, DTYPE, Layout.row_major(3, 3), MutableAnyOrigin](InlineArray[Scalar[DTYPE], 9](
-                1.0 / scale[0],
-                0.0,
-                0.0,
-                0.0,
-                1.0 / scale[1],
-                0.0,
-                0.0,
-                0.0,
-                1.0 / scale[2]
-            ).unsafe_ptr())
-            iscl_rot = matmul3x3(S, transpose(R))
-            iscl_rot_batch[tr] = iscl_rot
+            # Build a LayoutTensor from the quaternion SIMD values
+            var q_arr = InlineArray[Scalar[DTYPE], 4](
+                quat_data[0], quat_data[1], quat_data[2], quat_data[3]
+            )
+            var q_tensor = LayoutTensor[DTYPE, Layout.row_major(4, 1), MutableAnyOrigin](q_arr.unsafe_ptr())
+            var R = quat_to_rotmat(q_tensor)
 
-            barrier()
+            var s_arr = InlineArray[Scalar[DTYPE], 9](
+                1.0 / scale_data[0],
+                0.0,
+                0.0,
+                0.0,
+                1.0 / scale_data[1],
+                0.0,
+                0.0,
+                0.0,
+                1.0 / scale_data[2]
+            )
+            var S = LayoutTensor[mut=True, DTYPE, Layout.row_major(3, 3), MutableAnyOrigin](s_arr.unsafe_ptr())
+            var iscl_rot = matmul3x3(S, transpose(R))
+            @parameter
+            for _ri in range(3):
+                @parameter
+                for _ci in range(3):
+                    iscl_rot_batch[tr, _ri, _ci] = iscl_rot[_ri, _ci]
 
-            batch_size = min(block_size, range_end - batch_start)
-            t=0
-            while t < Int(batch_size) and not done:
-                xyz_opac = xyz_opacity_batch[t]
-                opac = xyz_opac.e[3]
-                xyz = Vec3(xyz_opac.e[0], xyz_opac.e[1], xyz_opac.e[2])
-                # iscl_rot = iscl_rot_batch[t]
+        barrier()
 
-                t += 1
+        batch_size = min(block_size, range_end - batch_start)
+        t = 0
+        while t < Int(batch_size) and not done:
+            var xo_ptr = xyz_opacity_batch.bitcast[Float32]()
+            var xo_opac = xo_ptr[t * 4 + 3]
+            var xo_xyz = Vec3(xo_ptr[t * 4 + 0], xo_ptr[t * 4 + 1], xo_ptr[t * 4 + 2])
+            # var cur_iscl_rot = iscl_rot_batch[t]
+
+            t += 1
     
 def main():
     with DeviceContext() as ctx:

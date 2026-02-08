@@ -1,5 +1,12 @@
 from collections import InlineArray
 from math import sqrt
+from random import random_float64
+
+
+@always_inline
+fn _random_f32(min: Float32, max: Float32) -> Float32:
+    return Float32(random_float64(Float64(min), Float64(max)))
+
 
 # Point3 is just an alias for Vec3, but useful for geometric clarity in the code.
 alias Point3 = Vec3
@@ -123,7 +130,7 @@ struct Vec3:
     @staticmethod
     fn random_in_unit_disk() -> Self:
         while True:
-            p = Self(random_Float32(-1, 1), random_Float32(-1, 1), 0)
+            p = Self(_random_f32(-1, 1), _random_f32(-1, 1), 0)
             if p.length_squared() < 1:
                 return p
 
@@ -131,9 +138,9 @@ struct Vec3:
     @always_inline
     fn random(min: Float32 = 0.0, max: Float32 = 1.0) -> Self:
         return Self(
-            random_Float32(min, max),
-            random_Float32(min, max),
-            random_Float32(min, max),
+            _random_f32(min, max),
+            _random_f32(min, max),
+            _random_f32(min, max),
         )
 
     @staticmethod
@@ -141,7 +148,7 @@ struct Vec3:
         while True:
             p = Self.random(-1, 1)
             lensq = p.length_squared()
-            if 1e-160 < lensq <= 1:
+            if lensq > Float32(1e-160) and lensq <= 1.0:
                 return p / sqrt(lensq)
 
     @staticmethod
@@ -298,7 +305,7 @@ struct Vec4:
     @staticmethod
     fn random_in_unit_disk() -> Self:
         while True:
-            p = Self(random_Float32(-1, 1), random_Float32(-1, 1), 0)
+            p = Self(_random_f32(-1, 1), _random_f32(-1, 1), 0)
             if p.length_squared() < 1:
                 return p
 
@@ -306,9 +313,9 @@ struct Vec4:
     @always_inline
     fn random(min: Float32 = 0.0, max: Float32 = 1.0) -> Self:
         return Self(
-            random_Float32(min, max),
-            random_Float32(min, max),
-            random_Float32(min, max),
+            _random_f32(min, max),
+            _random_f32(min, max),
+            _random_f32(min, max),
         )
 
     @staticmethod
@@ -316,11 +323,11 @@ struct Vec4:
         while True:
             p = Self.random(-1, 1)
             lensq = p.length_squared()
-            if 1e-160 < lensq <= 1:
+            if lensq > Float32(1e-160) and lensq <= 1.0:
                 return p / sqrt(lensq)
 
     @staticmethod
-    fn random_on_hemisphere(normal: Vec3) -> Vec3:
+    fn random_on_hemisphere(normal: Vec4) -> Vec4:
         on_unit_sphere = Self.random_unit_vector()
         # In the same hemisphere as the normal
         if on_unit_sphere.dot(normal) > 0.0:
@@ -340,7 +347,7 @@ struct Vec4:
         )
 
     @always_inline
-    fn reflect(self, n: Vec3) -> Vec3:
+    fn reflect(self, n: Self) -> Self:
         return self - 2 * self.dot(n) * n
 
     @always_inline
@@ -349,4 +356,3 @@ struct Vec4:
         r_out_perp = etai_over_etat * (self + cos_theta * n)
         r_out_parallel = -sqrt(abs(1.0 - r_out_perp.length_squared())) * n
         return r_out_perp + r_out_parallel
-        
