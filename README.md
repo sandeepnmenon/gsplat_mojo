@@ -3,56 +3,67 @@
 3D Gaussian Splatting rendering kernels implemented in [Mojo](https://www.modular.com/mojo), targeting GPU acceleration via Modular's MAX platform.
 
 > **Status:** Built against current Mojo (`1.1.0.dev`). The forward pass runs
-> end to end on GPU — PLY load, projection, tile binning, depth sort, and
-> rasterization — and renders `assets/christmas_tree.ply` (329k gaussians).
-> Verified pixel-exactly against independent references on synthetic scenes,
-> and against a float64 reference on the real one. The MAX custom-op path
-> (`render.mojo`) has not been ported, and there is no backward pass.
+> end to end on GPU — PLY load, spherical harmonics, projection, tile binning,
+> GPU radix depth sort, and rasterization — and renders
+> `assets/christmas_tree.ply` (329k gaussians). Reachable both natively and as
+> a MAX custom op. Verified pixel-exactly against independent references on
+> synthetic scenes and against a float64 reference on the real one. There is
+> no backward pass.
 
 ## Project Structure
 
 ```
 gsplat_mojo/
 ├── assets/
-│   └── christmas_tree.ply          # Sample PLY model for testing
+│   └── christmas_tree.ply          # Sample 3DGS model (329k gaussians)
+├── driver.py                       # Runs the custom op via a MAX graph
 ├── gsplat/
 │   ├── mojoproject.toml            # Mojo project config (read by pixi)
-│   ├── pixi.lock                   # Dependency lock file
-│   ├── config.mojo                 # Shared sizes, constants and tensor layouts
-│   ├── scene.mojo                  # Deterministic test scenes
-│   ├── ply.mojo                    # INRIA-format 3DGS PLY loader
-│   ├── refmath.mojo                # float32/float64 host reference for the intersection
-│   ├── vec.mojo                    # Vec3/Vec4 math primitives
-│   ├── utils_t.mojo                # Mat3/Mat2, rotation and quaternion helpers
-│   └── operations/
-│       ├── intersect.mojo          # Tile binning + GPU bitonic depth sort
-│       ├── intersect_test.mojo     # Exact check of the binning stage
-│       ├── gsplat_forward.mojo     # Rasterizer + 3-phase self-check (has main())
-│       ├── render_ply.mojo         # Renders a real PLY and verifies it
-│       └── render.mojo             # MAX custom op — NOT ported, does not compile
+│   ├── gsplat_kernels/             # Mojo package — precompiles to .mojoc
+│   │   ├── config.mojo             #   sizes, constants and tensor layouts
+│   │   ├── vec.mojo                #   Vec3 / Vec4
+│   │   ├── utils_t.mojo            #   Mat3 / Mat2, rotations, quaternions
+│   │   ├── ply.mojo                #   INRIA-format 3DGS PLY loader
+│   │   ├── spherical_harmonics.mojo#   view-dependent colour pre-pass
+│   │   ├── intersect.mojo          #   tile binning, scan, radix depth sort
+│   │   ├── rasterize.mojo          #   the ray/gaussian rasterization kernel
+│   │   └── render.mojo             #   MAX custom op wrapping the pipeline
+│   └── tests/                      # executables — a package cannot hold main()
+│       ├── scene.mojo              #   deterministic synthetic scenes
+│       ├── refmath.mojo            #   float32/float64 host reference
+│       ├── forward_test.mojo       #   rasterizer, 3 phases
+│       ├── intersect_test.mojo     #   binning + sort vs a serial reference
+│       ├── sh_test.mojo            #   SH vs a closed-form basis
+│       └── render_ply.mojo         #   renders a real PLY and verifies it
 └── README.md
 ```
+
+The kernels are a real Mojo package rather than loose files because MAX loads
+custom extensions from a `.mojoc`, and a package cannot contain a `main()`.
 
 ### Key Files
 
 | File | Description |
 |------|-------------|
-| `config.mojo` | Scene/image sizes, compositing cutoffs, and every tensor layout, shared so the stages agree |
-| `scene.mojo` | Deterministic test scenes — pure functions of the gaussian index, so device staging and host reference never drift |
-| `vec.mojo` | SIMD-backed `Vec3` / `Vec4` with arithmetic, dot/cross product, normalization |
-| `utils_t.mojo` | `Mat3`/`Mat2` value types plus `rotation_matrix_to_quaternion`, `quat_to_rotmat`, `transpose`, `matmul3x3`, `g_scalar` |
-| `operations/intersect.mojo` | Projection, tile-footprint bounding, prefix sum, key emission, GPU bitonic sort, tile-offset extraction |
-| `operations/gsplat_forward.mojo` | Ray/gaussian rasterization kernel and the self-checking render |
-| `ply.mojo` | Parses binary 3DGS PLY files and undoes the trainer's parameterization (sigmoid opacity, exp scale, SH colour, quaternion reorder) |
-| `operations/render_ply.mojo` | Loads a PLY, renders it, writes a PPM, and verifies sampled pixels |
+| `gsplat_kernels/config.mojo` | Sizes, compositing cutoffs, radix/scan geometry, and every tensor layout |
+| `gsplat_kernels/vec.mojo` | SIMD-backed `Vec3` / `Vec4` |
+| `gsplat_kernels/utils_t.mojo` | `Mat3`/`Mat2` value types, quaternion and rotation helpers |
+| `gsplat_kernels/ply.mojo` | Parses binary 3DGS PLY and undoes the trainer's parameterization |
+| `gsplat_kernels/spherical_harmonics.mojo` | Resolves SH coefficients to RGB for the current camera |
+| `gsplat_kernels/intersect.mojo` | Projection, tile bounding, two-level scan, LSD radix sort, tile offsets |
+| `gsplat_kernels/rasterize.mojo` | Ray/gaussian rasterization kernel |
+| `gsplat_kernels/render.mojo` | `@register("render")` custom op wrapping the whole pipeline |
 
 ## Running the checks
 
 ```bash
 cd gsplat
 pixi run forward     # rasterizer, 3 phases
-pixi run intersect   # binning + depth sort, against a serial reference
+pixi run intersect   # binning + radix sort, vs a serial reference and vs bitonic
+pixi run sh          # spherical harmonics vs a closed-form basis
 pixi run render-ply  # render assets/christmas_tree.ply -> render.ppm
+pixi run package     # build gsplat_kernels.mojoc for MAX
+pixi run python ../driver.py   # run the custom op and diff against render.ppm
 ```
 
 `render.ppm` is a plain binary PPM; convert it with
@@ -108,8 +119,8 @@ pixi run mojo format .
 The whole forward pipeline runs on GPU:
 
 ```
-load PLY  ->  project & count  ->  two-level prefix sum  ->  emit (tile, depth) keys
-          ->  bitonic sort  ->  tile offsets  ->  rasterize
+load PLY -> resolve SH -> project & count -> two-level prefix sum
+         -> emit (tile, depth) keys -> radix sort -> tile offsets -> rasterize
 ```
 
 ### Rendering a real scene
@@ -120,25 +131,58 @@ load PLY  ->  project & count  ->  two-level prefix sum  ->  emit (tile, depth) 
 ![christmas tree render](assets/render_preview.png)
 
 ```
-gaussians: 329004
+gaussians: 329004 | SH degree 0 ( 1 coefficients )
 tile intersections: 2258276
-sorted 4194304 slots in 253 bitonic passes
-coverage: 723850 of 786432 px lit ( 92 % ) | mean alpha 0.606 | max alpha 0.9999
+radix sort: 11 passes over 1103 blocks
+coverage: 723850 of 786432 px lit ( 92 % ) | mean alpha 0.606
 max |GPU      - float64 truth| 0.0162   mean 3.29e-05
 max |host f32 - float64 truth| 0.0174   mean 3.11e-05   <- float32 noise floor
-PASS: PLY render is within the float32 noise floor of the independent reference
 ```
 
 A whole-image host reference is not affordable at this scale, so 4096 spread
 pixels are recomputed on the host from the tile lists the GPU actually
 produced. **The bar is not a fixed tolerance.** These gaussians are ~1e-3
 across and ~5 units away, so the intersection ends in `p = og + t*·dg`, a
-near-total cancellation; evaluating that in float32 is genuinely uncertain.
-The float32 host reference misses the float64 truth by *more* than the GPU
-does (0.0174 vs 0.0162), so the test asserts the GPU is no worse than an
-independent float32 evaluation rather than demanding better-than-float32.
-Typical error is 3e-05; the millipixel-scale outliers sit on chains up to 196
-gaussians deep.
+near-total cancellation; evaluating it in float32 is genuinely uncertain. The
+float32 host reference misses the float64 truth by *more* than the GPU does,
+so the test asserts the GPU is no worse than an independent float32
+evaluation rather than demanding better-than-float32.
+
+That conditioning has a visible consequence: a **one-ulp** change to the focal
+length measurably shifts the image. It is why `driver.py` computes its focal
+stepwise in float32 to match the Mojo constant bit for bit.
+
+### The sort
+
+The depth sort is an LSD radix sort with 4-bit digits, run over only the bits
+the key uses (12 tile bits + 32 depth bits = 11 passes rather than 16). It
+replaced a bitonic sort, which is kept as a reference implementation for the
+test to check against:
+
+```
+elements: 2258276 (bitonic padded to 4194304)
+radix  : 11 passes, 1103 blocks ->  15.5 ms
+bitonic: 253 passes             ->  90.6 ms
+speedup: 5.86x        key streams differ in 0 of 2258276 slots
+```
+
+Stability is what makes LSD radix correct at all, and it comes from summing
+three in-order offsets: the scanned per-(digit, block) base, the thread's slot
+within its block's run of that digit, and a running count over the thread's
+own elements.
+
+### Spherical harmonics
+
+Colour is view-dependent. `compute_colors_from_sh` resolves SH coefficients to
+RGB for the current camera as a pre-pass, so the rasterizer still reads plain
+RGB and needs no knowledge of SH. Degrees 0-3 are supported.
+
+`assets/christmas_tree.ply` is **degree 0**, so it cannot exercise this path —
+`pixi run sh` drives it directly instead, checking that degree 0 reduces
+exactly to `C0*c0 + 0.5`, that degree 3 matches a host evaluation whose basis
+constants are written as closed forms (`0.5*sqrt(1/pi)` and friends, so a
+mistyped literal is caught), and that moving the camera actually changes the
+colours.
 
 ### Synthetic self-checks
 
@@ -153,31 +197,39 @@ pixel three ways:
 
 Phase 3 is exact: real binning visits 1367 tile/gaussian pairs instead of
 73728, a **54x** reduction, and reproduces the brute-force image bit for bit.
-`pixi run intersect` separately checks the binning against a serial host
-implementation: total count, every `tile_offsets` entry, the set of gaussians
-per tile, and depth ordering within each run.
 
 All of it is mutation-tested rather than merely green:
 
 | Mutation | Caught by |
 |----------|-----------|
 | `transpose(rotation)` -> `rotation` in `S^-1 R^T` | phase 2 (50k px); phase 1 still passes |
-| skip the bitonic passes | `intersect`: 2111 bad offsets, 902 bad tile sets |
+| skip the sort entirely | `intersect`: 2111 bad offsets, 902 bad tile sets |
 | shrink the footprint bound to 0.6x | phase 3: 32657 px differing; `intersect` still passes |
+
+### The MAX custom op
+
+`gsplat_kernels/render.mojo` exposes the pipeline as `@register("render")`.
+The port from the retired API was structural, not cosmetic:
+
+| old | new |
+|-----|-----|
+| `import compiler`, `@compiler.register` | `from extensibility import register`, `@register` |
+| `from tensor import InputTensor` | `from extensibility import InputTensor` |
+| `InputTensor[type=..., rank=n]` | `InputTensor[dtype=..., rank=n, static_spec=_]` |
+| `ctx: DeviceContextPtr` + `ctx.get_device_context()` | `ctx: DeviceContext` |
+
+`driver.py` drives it through a MAX graph on the real PLY and diffs the result
+against the natively-rendered `render.ppm`. They agree on 99.99% of channels;
+the ~27 pixels that differ by more than 4/255 sit in the densest part of the
+scene, where composite chains are deepest and the conditioning above bites.
 
 Still outstanding:
 
-- **The bitonic sort is `O(n log^2 n)`** — 253 kernel launches for the tree.
-  gsplat uses a radix sort here; this is correct but the main performance gap.
-- **The prefix sum is two-level**, capping input at `SCAN_BLOCK * SCAN_WIDTH`
-  = 1,048,576 gaussians. Fine for this scene, but not unbounded.
-- **No spherical harmonics** — only the order-0 (view-independent) colour is
-  used, so the render has no view-dependent shading.
-- **`operations/render.mojo` does not compile.** It targets the old custom-op
-  API (`@compiler.register`, `tensor.InputTensor`, `runtime.asyncrt`); these
-  are now `extensibility.register` / `extensibility.InputTensor`, and
-  `DeviceContextPtr` no longer exists.
+- **The scan is two-level**, capping input at `SCAN_BLOCK * SCAN_WIDTH` =
+  1,048,576 gaussians. Fine for this scene, but not unbounded.
 - **No backward pass**, so this renders but cannot train.
+- **Anti-aliasing and the EWA `+0.3` dilation** are only used for the culling
+  bound, not for shading, so there is no screen-space low-pass filter.
 
 ## Architecture
 

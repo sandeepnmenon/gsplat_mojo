@@ -10,6 +10,7 @@ forward = "mojo run -I . -I tests tests/forward_test.mojo"
 intersect = "mojo run -I . -I tests tests/intersect_test.mojo"
 render-ply = "mojo run -I . -I tests tests/render_ply.mojo"
 sh = "mojo run -I . -I tests tests/sh_test.mojo"
+package = "mojo precompile gsplat_kernels -o gsplat_kernels.mojoc -I ."
 
 [dependencies]
 max = "*"
