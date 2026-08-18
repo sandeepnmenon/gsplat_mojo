@@ -175,3 +175,8 @@ cython_debug/
 
 # Artifacts
 *.ppm
+# gsplat build + render artifacts
+gsplat/gsplat_kernels.mojoc
+gsplat/.pixi/
+render.ppm
+render_customop.ppm
