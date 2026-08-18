@@ -52,8 +52,11 @@ struct PlyGaussians(Movable):
     var means: List[Float32]  # 3 per gaussian
     var quats: List[Float32]  # 4 per gaussian, (x, y, z, w), normalized
     var scales: List[Float32]  # 3 per gaussian, linear
-    var colors: List[Float32]  # 3 per gaussian, in [0, 1]
+    var colors: List[Float32]  # 3 per gaussian, in [0, 1] — the degree-0 view
     var opacities: List[Float32]  # 1 per gaussian, in [0, 1]
+    var sh: List[Float32]  # sh_coeffs * 3 per gaussian, raw coefficients
+    var sh_coeffs: Int  # (degree + 1)^2
+    var sh_degree: Int
 
 
 def _find_header_end(raw: List[UInt8]) raises -> Int:
@@ -97,6 +100,8 @@ def load_ply(path: String) raises -> PlyGaussians:
     for _ in range(N_WANTED):
         index_of_slot.append(-1)
     var wanted = WANTED_NAMES.split("|")
+    # f_rest_<k> holds the higher-order SH coefficients, if the file has any.
+    var frest_index = List[Int]()
 
     for line_slice in header.split("\n"):
         var line = String(line_slice).strip()
@@ -122,6 +127,11 @@ def load_ply(path: String) raises -> PlyGaussians:
             for slot in range(len(wanted)):
                 if String(wanted[slot]) == name:
                     index_of_slot[slot] = n_props
+            if name.startswith("f_rest_"):
+                var k = Int(String(name.removeprefix("f_rest_")))
+                while len(frest_index) <= k:
+                    frest_index.append(-1)
+                frest_index[k] = n_props
             n_props += 1
         elif head == "end_header":
             break
@@ -142,6 +152,23 @@ def load_ply(path: String) raises -> PlyGaussians:
     if payload_start % 4 != 0:
         raise Error("ply: payload is not 4-byte aligned")
 
+    # Higher-order SH is optional. The trainer writes features_rest as
+    # [N, 3, K-1] flattened, i.e. channel-major, so f_rest_i belongs to
+    # channel i // (K-1) at coefficient 1 + i % (K-1).
+    var n_frest = len(frest_index)
+    if n_frest % 3 != 0:
+        raise Error("ply: f_rest_* count is not a multiple of 3")
+    for i in range(n_frest):
+        if frest_index[i] < 0:
+            raise Error("ply: f_rest_* indices are not contiguous")
+    var rest_per_channel = n_frest // 3
+    var sh_coeffs = rest_per_channel + 1
+    var sh_degree = 0
+    while (sh_degree + 1) * (sh_degree + 1) < sh_coeffs:
+        sh_degree += 1
+    if (sh_degree + 1) * (sh_degree + 1) != sh_coeffs:
+        raise Error("ply: f_rest_* count does not form a whole SH degree")
+
     # x86 and the file are both little-endian, so the payload can be read as
     # float32 directly.
     var fp = raw.unsafe_ptr().unsafe_bitcast[Float32]()
@@ -152,6 +179,7 @@ def load_ply(path: String) raises -> PlyGaussians:
     var scales = List[Float32](capacity=n_verts * 3)
     var colors = List[Float32](capacity=n_verts * 3)
     var opacities = List[Float32](capacity=n_verts)
+    var sh = List[Float32](capacity=n_verts * sh_coeffs * 3)
 
     var ix = index_of_slot[P_X]
     var iy = index_of_slot[P_Y]
@@ -197,6 +225,16 @@ def load_ply(path: String) raises -> PlyGaussians:
         quats.append(qz / qn)
         quats.append(qw / qn)
 
+        # Raw SH coefficients, coefficient-major: [coeff][channel].
+        sh.append(fp[unsafe_offset = b + idc0])
+        sh.append(fp[unsafe_offset = b + idc1])
+        sh.append(fp[unsafe_offset = b + idc2])
+        for c in range(rest_per_channel):
+            for ch in range(3):
+                sh.append(
+                    fp[unsafe_offset = b + frest_index[ch * rest_per_channel + c]]
+                )
+
         # order-0 SH -> linear RGB
         colors.append(
             (SH_C0 * fp[unsafe_offset = b + idc0] + 0.5).clamp(0.0, 1.0)
@@ -218,4 +256,7 @@ def load_ply(path: String) raises -> PlyGaussians:
         scales=scales^,
         colors=colors^,
         opacities=opacities^,
+        sh=sh^,
+        sh_coeffs=sh_coeffs,
+        sh_degree=sh_degree,
     )

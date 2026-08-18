@@ -82,6 +82,13 @@ comptime KEY_BITS = 32 + TILE_BITS
 comptime RADIX_PASSES = ceildiv(KEY_BITS, RADIX_BITS)
 comptime layout_radix_sh = row_major[RADIX * RADIX_TPB]()
 
+# Spherical harmonics. Degree 3 is what the reference 3DGS trainer emits at
+# most, giving (3+1)^2 = 16 coefficients per colour channel. Files with a
+# lower degree are zero-padded to this stride so one layout serves all of them.
+comptime SH_DEGREE_MAX = 3
+comptime SH_COEFFS = (SH_DEGREE_MAX + 1) * (SH_DEGREE_MAX + 1)
+comptime layout_sh = row_major[N_MAX, SH_COEFFS, 3]()
+
 comptime layout_n3 = row_major[N_MAX, 3]()
 comptime layout_n4 = row_major[N_MAX, 4]()
 comptime layout_n = row_major[N_MAX]()
