@@ -6,9 +6,9 @@ platforms = ["linux-64"]
 version = "0.1.0"
 
 [tasks]
-forward = "mojo run -I . operations/gsplat_forward.mojo"
-intersect = "mojo run -I . operations/intersect_test.mojo"
-render-ply = "mojo run -I . operations/render_ply.mojo"
+forward = "mojo run -I . -I tests tests/forward_test.mojo"
+intersect = "mojo run -I . -I tests tests/intersect_test.mojo"
+render-ply = "mojo run -I . -I tests tests/render_ply.mojo"
 
 [dependencies]
 max = "*"

@@ -13,7 +13,7 @@ inverses of each other under that convention.
 
 from std.math import exp, pi, sqrt
 
-from vec import Vec3, Vec4
+from gsplat_kernels.vec import Vec3, Vec4
 
 comptime DTYPE = DType.float32
 

@@ -1,17 +1,4 @@
-"""Tile-based 3D gaussian rasterization — forward pass.
-
-Structure follows gsplat's `rasterize_to_pixels_from_world_3dgs_fwd`: one
-thread block per (camera, tile), gaussians for the tile streamed through
-shared memory in block-sized batches, then alpha-composited front-to-back.
-
-Each gaussian is evaluated by ray/gaussian intersection rather than by an EWA
-2D-splat projection: `iscl_rot` = S^-1 R^T maps world space into the frame
-where the gaussian is the unit sphere, the ray's closest approach to the
-origin in that frame gives rho^2, and the response is exp(-rho^2 / 2).
-Contributions are composited in `flatten_ids` order, so that list must be
-depth-sorted per tile -- which is what `operations/intersect.mojo` produces.
-
-`main()` is a self-checking render in three phases:
+"""Self-checking render of the forward rasterizer, in three phases.
 
   1. isotropic gaussians on the optical axis, identity camera, every tile
      given every gaussian -- checked against a closed form
@@ -22,21 +9,17 @@ depth-sorted per tile -- which is what `operations/intersect.mojo` produces.
      intersection stage -- checked against the phase 2 image, which is the
      brute-force answer
 
-Phase 1 pins the maths, phase 2 covers the rotation/anisotropy/pose paths
+Phase 1 pins the maths, phase 2 covers the rotation/anisotropy/pose paths that
 phase 1 leaves on the identity path, and phase 3 shows the culling drops only
 gaussians that could not have changed the image.
 """
 
 from std.math import ceildiv, exp, sqrt
-from std.gpu import block_dim, block_idx, thread_idx
 from std.sys import has_accelerator
 from max.gpu.host import DeviceContext
-from max.gpu.memory import AddressSpace
-from max.gpu.sync import barrier
-from layout import TileTensor, row_major, stack_allocation
+from layout import TileTensor
 
-from config import (
-    BLOCK_SIZE,
+from gsplat_kernels.config import (
     C,
     CDIM,
     CX,
@@ -48,13 +31,15 @@ from config import (
     IMG_W,
     KDTYPE,
     MAX_ALPHA,
-    MAX_ISECTS,
     MIN_ALPHA,
     N_MAX,
     N_TEST,
     N_TILES,
     N_TILES_X,
     N_TILES_Y,
+    RADIX,
+    RADIX_EPB,
+    RADIX_PASSES,
     SCAN_BLOCK,
     SCAN_NUM_BLOCKS,
     SCAN_WIDTH,
@@ -63,10 +48,10 @@ from config import (
     layout_blocksums,
     layout_cdim,
     layout_cn,
-    layout_cn_flat,
     layout_cn4,
     layout_cn_cdim,
     layout_cn_f,
+    layout_cn_flat,
     layout_cn_i,
     layout_c2,
     layout_c6,
@@ -82,16 +67,18 @@ from config import (
     layout_tiles_flat,
     layout_viewmats,
 )
-from operations.intersect import (
+from gsplat_kernels.intersect import (
     KEY_MAX,
     add_block_offsets,
-    bitonic_step,
     emit_isects,
     project_and_count,
+    radix_sort_pairs,
     scan_block,
     scan_block_sums,
     write_tile_offsets,
 )
+from gsplat_kernels.rasterize import rasterize_to_pixels_from_world_3dgs_fwd
+from refmath import _ref_rho2
 from scene import (
     axis_opacity,
     axis_scale,
@@ -105,306 +92,10 @@ from scene import (
     view_rot,
     view_trans,
 )
-from refmath import _ref_rho2
-from utils_t import Mat3, matmul3x3, quat_to_rotmat, transpose
-from vec import Vec3, Vec4
 
 comptime BG = SIMD[DTYPE, 4](0.1, 0.15, 0.2, 0.0)
 comptime MASKED_TILE = 0  # one tile forced invisible, to cover the mask path
 comptime TOL: Float32 = 2e-4  # GPU vs host exp() disagree in the last bits
-
-
-@fieldwise_init
-struct SE3(Copyable, ImplicitlyCopyable, Movable):
-    var rotation: Mat3
-    var translation: Vec3
-
-
-def extract_se3(
-    viewmats: TileTensor[DTYPE, type_of(layout_viewmats), MutAnyOrigin],
-    cid: Int,
-) -> SE3:
-    """Pull the rotation block and translation column out of a [4, 4] view matrix."""
-    comptime assert viewmats.flat_rank == 3
-    var rotation = Mat3()
-    comptime for r in range(3):
-        comptime for c in range(3):
-            rotation[r, c] = rebind[Scalar[DTYPE]](viewmats[cid, r, c])
-    var translation = Vec3(
-        rebind[Scalar[DTYPE]](viewmats[cid, 0, 3]),
-        rebind[Scalar[DTYPE]](viewmats[cid, 1, 3]),
-        rebind[Scalar[DTYPE]](viewmats[cid, 2, 3]),
-    )
-    return SE3(rotation=rotation, translation=translation)
-
-
-@fieldwise_init
-struct RollingShutterParameters(Copyable, ImplicitlyCopyable, Movable):
-    """Start/end camera pose for a rolling-shutter interval.
-
-    When there is no end pose the interval collapses to the start pose (the
-    original had this test inverted, so it read the uninitialized end pose).
-    """
-
-    var t_start: Vec3
-    var q_start: Vec4
-    var t_end: Vec3
-    var q_end: Vec4
-
-    def __init__(out self, start: SE3, end: SE3, has_end: Bool):
-        from utils_t import rotation_matrix_to_quaternion
-
-        self.t_start = start.translation
-        self.q_start = rotation_matrix_to_quaternion(start.rotation)
-        if has_end:
-            self.t_end = end.translation
-            self.q_end = rotation_matrix_to_quaternion(end.rotation)
-        else:
-            self.t_end = self.t_start
-            self.q_end = self.q_start
-
-
-def rasterize_to_pixels_from_world_3dgs_fwd(
-    n_cameras: Int32,
-    n_gaussians: Int32,
-    n_isects: Int32,
-    packed: Int32,
-    means: TileTensor[DTYPE, type_of(layout_n3), MutAnyOrigin],  # [N, 3]
-    quats: TileTensor[DTYPE, type_of(layout_n4), MutAnyOrigin],  # [N, 4]
-    scales: TileTensor[DTYPE, type_of(layout_n3), MutAnyOrigin],  # [N, 3]
-    colors: TileTensor[DTYPE, type_of(layout_cn_cdim), MutAnyOrigin],  # [C, N, CDIM]
-    opacities: TileTensor[DTYPE, type_of(layout_cn), MutAnyOrigin],  # [C, N]
-    backgrounds: TileTensor[DTYPE, type_of(layout_cdim), MutAnyOrigin],  # [C, CDIM]
-    masks: TileTensor[IDTYPE, type_of(layout_tiles), MutAnyOrigin],  # [C, TY, TX]
-    has_backgrounds: Int32,  # Bool is not DevicePassable
-    has_masks: Int32,
-    image_width: Int32,
-    image_height: Int32,
-    tile_size: Int32,
-    tile_width: Int32,  # tiles across, not pixels
-    tile_height: Int32,  # tiles down, not pixels
-    # camera model
-    viewmats0: TileTensor[DTYPE, type_of(layout_viewmats), MutAnyOrigin],
-    viewmats1: TileTensor[DTYPE, type_of(layout_viewmats), MutAnyOrigin],
-    Ks: TileTensor[DTYPE, type_of(layout_intrinsics), MutAnyOrigin],  # [C, 3, 3]
-    camera_model_type: Int32,
-    rs_type: Int32,
-    radial_coeffs: TileTensor[DTYPE, type_of(layout_c6), MutAnyOrigin],
-    tangential_coeffs: TileTensor[DTYPE, type_of(layout_c2), MutAnyOrigin],
-    thin_prims_coeffs: TileTensor[DTYPE, type_of(layout_c2), MutAnyOrigin],
-    # intersections
-    tile_offsets: TileTensor[IDTYPE, type_of(layout_tiles), MutAnyOrigin],
-    flatten_ids: TileTensor[IDTYPE, type_of(layout_isects), MutAnyOrigin],
-    render_colors: TileTensor[DTYPE, type_of(layout_render_colors), MutAnyOrigin],
-    render_alphas: TileTensor[DTYPE, type_of(layout_render_alphas), MutAnyOrigin],
-    last_ids: TileTensor[IDTYPE, type_of(layout_last_ids), MutAnyOrigin],
-):
-    comptime assert CDIM <= 4, "pixel accumulator is a 4-lane SIMD"
-    comptime assert means.flat_rank == 2
-    comptime assert quats.flat_rank == 2
-    comptime assert scales.flat_rank == 2
-    comptime assert colors.flat_rank == 3
-    comptime assert opacities.flat_rank == 2
-    comptime assert backgrounds.flat_rank == 2
-    comptime assert masks.flat_rank == 3
-    comptime assert Ks.flat_rank == 3
-    comptime assert tile_offsets.flat_rank == 3
-    comptime assert flatten_ids.flat_rank == 1
-    comptime assert render_colors.flat_rank == 4
-    comptime assert render_alphas.flat_rank == 4
-    comptime assert last_ids.flat_rank == 3
-
-    # Kernel scalars arrive fixed-width (Int/UInt are not DevicePassable);
-    # widen once here so the rest of the body indexes with plain Int.
-    var n_cams = Int(n_cameras)
-    var total_isects = Int(n_isects)
-    var img_w = Int(image_width)
-    var img_h = Int(image_height)
-    var tsize = Int(tile_size)
-    var twidth = Int(tile_width)
-    var theight = Int(tile_height)
-    var use_bg = has_backgrounds != 0
-    var use_masks = has_masks != 0
-
-    var cid = Int(block_idx.z)
-    var tile_row = Int(block_idx.y)
-    var tile_col = Int(block_idx.x)
-    var tile_id = tile_row * twidth + tile_col
-
-    var i = tile_row * tsize + Int(thread_idx.y)
-    var j = tile_col * tsize + Int(thread_idx.x)
-
-    var px = Float32(j) + 0.5
-    var py = Float32(i) + 0.5
-
-    var inside = i < img_h and j < img_w
-    var done = not inside
-
-    var focal_x = rebind[Scalar[DTYPE]](Ks[cid, 0, 0])
-    var focal_y = rebind[Scalar[DTYPE]](Ks[cid, 1, 1])
-    var principal_x = rebind[Scalar[DTYPE]](Ks[cid, 0, 2])
-    var principal_y = rebind[Scalar[DTYPE]](Ks[cid, 1, 2])
-
-    # Pixel ray, camera space. Not normalized: both the closest-approach
-    # parameter and rho^2 below are invariant to the length of the direction.
-    var ray_d_cam = Vec3(
-        (px - principal_x) / focal_x, (py - principal_y) / focal_y, 1.0
-    )
-
-    # Lift the ray into world space, since the gaussians are world-space.
-    # viewmats0 is world->camera (x_c = R x_w + t), so the camera->world
-    # rotation is R^T and the camera centre is -R^T t.
-    var cam = extract_se3(viewmats0, cid)
-    var rot_cam_to_world = transpose(cam.rotation)
-    var rayo = -(rot_cam_to_world * cam.translation)
-    var rayd = rot_cam_to_world * ray_d_cam
-
-    # A masked-out tile is uniform across the block, so returning here cannot
-    # strand some threads of the block at a later barrier().
-    if use_masks and Int(rebind[Scalar[IDTYPE]](masks[cid, tile_row, tile_col])) == 0:
-        if inside:
-            comptime for k in range(CDIM):
-                var bg: Float32 = 0.0
-                if use_bg:
-                    bg = rebind[Scalar[DTYPE]](backgrounds[cid, k])
-                render_colors[cid, i, j, k] = bg
-            render_alphas[cid, i, j, 0] = 0.0
-            last_ids[cid, i, j] = 0
-        return
-
-    # Range of this tile's gaussians inside flatten_ids. The end is the next
-    # tile's start, walking the flattened [C, TY, TX] order.
-    var range_start = Int(rebind[Scalar[IDTYPE]](tile_offsets[cid, tile_row, tile_col]))
-    var range_end: Int
-    if cid == n_cams - 1 and tile_id == twidth * theight - 1:
-        range_end = total_isects
-    else:
-        var next_tile = tile_id + 1
-        var next_cid = cid
-        if next_tile == twidth * theight:
-            next_tile = 0
-            next_cid = cid + 1
-        range_end = Int(
-            rebind[Scalar[IDTYPE]](
-                tile_offsets[
-                    next_cid, next_tile // twidth, next_tile % twidth
-                ]
-            )
-        )
-
-    var num_batches = ceildiv(range_end - range_start, BLOCK_SIZE)
-
-    var id_batch = stack_allocation[
-        IDTYPE, address_space = AddressSpace.SHARED
-    ](row_major[BLOCK_SIZE]())
-    var xyz_opacity_batch = stack_allocation[
-        DTYPE, address_space = AddressSpace.SHARED
-    ](row_major[BLOCK_SIZE, 4]())
-    var iscl_rot_batch = stack_allocation[
-        DTYPE, address_space = AddressSpace.SHARED
-    ](row_major[BLOCK_SIZE, 3, 3]())
-
-    var transmittance: Float32 = 1.0
-    var cur_idx: Int32 = 0
-    var pix_out = SIMD[DTYPE, 4](0.0)
-
-    var tr = Int(thread_idx.x + thread_idx.y * block_dim.x)
-
-    for b in range(num_batches):
-        # Every thread of the block runs the same number of iterations, so the
-        # barriers below are reached uniformly even by finished pixels.
-        barrier()
-
-        var batch_start = range_start + BLOCK_SIZE * b
-        var idx = batch_start + tr
-
-        if idx < range_end:
-            var g = Int(rebind[Scalar[IDTYPE]](flatten_ids[idx]))
-            id_batch[tr] = Int32(g)
-
-            xyz_opacity_batch[tr, 0] = rebind[Scalar[DTYPE]](means[g, 0])
-            xyz_opacity_batch[tr, 1] = rebind[Scalar[DTYPE]](means[g, 1])
-            xyz_opacity_batch[tr, 2] = rebind[Scalar[DTYPE]](means[g, 2])
-            xyz_opacity_batch[tr, 3] = rebind[Scalar[DTYPE]](opacities[cid, g])
-
-            var quat = Vec4(
-                rebind[Scalar[DTYPE]](quats[g, 0]),
-                rebind[Scalar[DTYPE]](quats[g, 1]),
-                rebind[Scalar[DTYPE]](quats[g, 2]),
-                rebind[Scalar[DTYPE]](quats[g, 3]),
-            )
-            var rotation = quat_to_rotmat(quat)
-            var inv_scale = Mat3.diagonal(
-                1.0 / rebind[Scalar[DTYPE]](scales[g, 0]),
-                1.0 / rebind[Scalar[DTYPE]](scales[g, 1]),
-                1.0 / rebind[Scalar[DTYPE]](scales[g, 2]),
-            )
-            var iscl_rot = matmul3x3(inv_scale, transpose(rotation))
-            comptime for r in range(3):
-                comptime for c in range(3):
-                    iscl_rot_batch[tr, r, c] = iscl_rot[r, c]
-
-        barrier()
-
-        var batch_size = min(BLOCK_SIZE, range_end - batch_start)
-        var t = 0
-        while t < batch_size and not done:
-            var opacity = rebind[Scalar[DTYPE]](xyz_opacity_batch[t, 3])
-            var mean = Vec3(
-                rebind[Scalar[DTYPE]](xyz_opacity_batch[t, 0]),
-                rebind[Scalar[DTYPE]](xyz_opacity_batch[t, 1]),
-                rebind[Scalar[DTYPE]](xyz_opacity_batch[t, 2]),
-            )
-            var cur_iscl_rot = Mat3()
-            comptime for r in range(3):
-                comptime for c in range(3):
-                    cur_iscl_rot[r, c] = rebind[Scalar[DTYPE]](
-                        iscl_rot_batch[t, r, c]
-                    )
-
-            # Ray/gaussian intersection. cur_iscl_rot is S^-1 R^T, which
-            # maps a world offset into the gaussian's canonical frame where
-            # the gaussian is the unit sphere. In that frame the response
-            # along the ray is a 1D gaussian, maximal at the ray's closest
-            # approach to the origin.
-            var og = cur_iscl_rot * (rayo - mean)
-            var dg = cur_iscl_rot * rayd
-            var dd = dg.dot(dg)
-            if dd > 1e-20:
-                var t_star = -og.dot(dg) / dd
-                if t_star > 0.0:  # ignore gaussians behind the camera
-                    var closest = og + dg * t_star
-                    var rho2 = closest.dot(closest)
-                    var alpha = min(
-                        Float32(MAX_ALPHA), opacity * exp(-0.5 * rho2)
-                    )
-                    if alpha >= MIN_ALPHA:
-                        var next_t = transmittance * (1.0 - alpha)
-                        if next_t < T_EPS:
-                            # Pixel is saturated; this gaussian is excluded.
-                            done = True
-                        else:
-                            var gid = Int(
-                                rebind[Scalar[IDTYPE]](id_batch[t])
-                            )
-                            var weight = alpha * transmittance
-                            comptime for k in range(CDIM):
-                                pix_out[k] += weight * rebind[
-                                    Scalar[DTYPE]
-                                ](colors[cid, gid, k])
-                            transmittance = next_t
-                            cur_idx = Int32(batch_start + t)
-            t += 1
-
-    if inside:
-        render_alphas[cid, i, j, 0] = 1.0 - transmittance
-        comptime for k in range(CDIM):
-            var bg: Float32 = 0.0
-            if use_bg:
-                bg = rebind[Scalar[DTYPE]](backgrounds[cid, k])
-            render_colors[cid, i, j, k] = pix_out[k] + transmittance * bg
-        last_ids[cid, i, j] = cur_idx
-
 
 def main() raises:
     comptime assert has_accelerator(), "gsplat forward pass requires a GPU"
@@ -655,7 +346,7 @@ def main() raises:
     for g in range(n_gauss):
         var zz: Float32 = 0.0
         comptime for a in range(3):
-            zz += view_rot(2, a) * spread_mean(g, a)
+            zz += view_rot(2, a) * spread_mean(g, a, n_gauss)
         cam_z.append(zz + view_trans(2))
     var order = List[Int]()
     for g in range(n_gauss):
@@ -671,7 +362,7 @@ def main() raises:
     for g in range(n_gauss):
         var qn = spread_quat_norm(g)
         comptime for a in range(3):
-            means_h[g * 3 + a] = spread_mean(g, a)
+            means_h[g * 3 + a] = spread_mean(g, a, n_gauss)
             scales_h[g * 3 + a] = spread_scale(g, a)
         comptime for a in range(4):
             quats_h[g * 4 + a] = spread_quat(g, a) / qn
@@ -743,7 +434,7 @@ def main() raises:
                     var g = order[oi]
                     var qn = spread_quat_norm(g)
                     var res = _ref_rho2(
-                        spread_mean(g, 0), spread_mean(g, 1), spread_mean(g, 2),
+                        spread_mean(g, 0, n_gauss), spread_mean(g, 1, n_gauss), spread_mean(g, 2, n_gauss),
                         spread_quat(g, 0) / qn, spread_quat(g, 1) / qn,
                         spread_quat(g, 2) / qn, spread_quat(g, 3) / qn,
                         spread_scale(g, 0), spread_scale(g, 1), spread_scale(g, 2),
@@ -816,31 +507,36 @@ def main() raises:
     ctx.synchronize()
     var n_isects = Int(total_h[0])
 
-    var n_pow2 = 1
-    while n_pow2 < n_isects:
-        n_pow2 *= 2
-    var keys_buf = ctx.enqueue_create_buffer[KDTYPE](n_pow2)
-    var sorted_buf = ctx.enqueue_create_buffer[IDTYPE](n_pow2)
+    # Radix sorts exactly n elements -- no power-of-two padding needed.
+    var n_rblocks = ceildiv(n_isects, RADIX_EPB)
+    var hist_size = RADIX * n_rblocks
+    var keys_buf = ctx.enqueue_create_buffer[KDTYPE](n_isects)
+    var sorted_buf = ctx.enqueue_create_buffer[IDTYPE](n_isects)
+    var keys_alt_buf = ctx.enqueue_create_buffer[KDTYPE](n_isects)
+    var vals_alt_buf = ctx.enqueue_create_buffer[IDTYPE](n_isects)
+    var hist_buf = ctx.enqueue_create_buffer[IDTYPE](hist_size)
+    var histoff_buf = ctx.enqueue_create_buffer[IDTYPE](hist_size)
+    var scratch_buf = ctx.enqueue_create_buffer[IDTYPE](1)
     keys_buf.enqueue_fill(KEY_MAX)
     sorted_buf.enqueue_fill(-1)
     var keys = TileTensor(keys_buf, layout_isects)
     var sorted_ids = TileTensor(sorted_buf, layout_isects)
+    var keys_alt = TileTensor(keys_alt_buf, layout_isects)
+    var vals_alt = TileTensor(vals_alt_buf, layout_isects)
+    var hist = TileTensor(hist_buf, layout_cn_flat)
+    var hist_off = TileTensor(histoff_buf, layout_cn_flat)
+    var scratch = TileTensor(scratch_buf, layout_one)
 
     ctx.enqueue_function[emit_isects](
         bboxes, depths, offsets, counts, keys, sorted_ids,
         Int32(n_gauss), Int32(N_TILES_X), Int32(N_TILES),
         grid_dim=(gblocks, C), block_dim=TPB,
     )
-    var k = 2
-    while k <= n_pow2:
-        var j = k // 2
-        while j > 0:
-            ctx.enqueue_function[bitonic_step](
-                keys, sorted_ids, Int32(n_pow2), Int32(k), Int32(j),
-                grid_dim=ceildiv(n_pow2, TPB), block_dim=TPB,
-            )
-            j //= 2
-        k *= 2
+    radix_sort_pairs(
+        ctx, keys, sorted_ids, keys_alt, vals_alt,
+        hist, hist_off, block_sums, scratch,
+        keys_buf, sorted_buf, keys_alt_buf, vals_alt_buf, n_isects,
+    )
     tileoff_buf.enqueue_fill(Int32(n_isects))
     ctx.enqueue_function[write_tile_offsets](
         keys, tile_offsets_flat, Int32(n_isects),
