@@ -15,9 +15,11 @@ launches:
      `add_block_offsets`
   3. `emit_isects`        write one (key, gaussian) pair per covered tile,
                           key = (tile << 32) | float_bits(depth)
-  4. `bitonic_step`       sort pairs by key: groups by tile, depth-ordered
-                          within a tile, which is exactly the front-to-back
-                          order the rasterizer composites in
+  4. `radix_histogram` /  LSD radix sort by key: groups by tile, depth-ordered
+     `radix_scatter`      within a tile, which is exactly the front-to-back
+                          order the rasterizer composites in. `bitonic_step`
+                          is kept as a simple reference implementation for the
+                          sort tests to check the radix sort against.
   5. `write_tile_offsets` run-boundary scan over the sorted keys
 
 The footprint bound in step 1 is the usual EWA projection of the 3D
@@ -28,19 +30,28 @@ bound only has to be conservative, never exact.
 
 from std.gpu import block_dim, block_idx, global_idx, thread_idx
 from std.math import ceildiv, log, sqrt
+from max.gpu.host import DeviceBuffer, DeviceContext
 from max.gpu.memory import AddressSpace
 from max.gpu.sync import barrier
 from layout import TileTensor, row_major, stack_allocation
 
-from config import (
+from gsplat_kernels.config import (
     C,
     DTYPE,
     IDTYPE,
     KDTYPE,
     MIN_ALPHA,
+    KEY_BITS,
     N_MAX,
+    RADIX,
+    RADIX_BITS,
+    RADIX_EPB,
+    RADIX_EPT,
+    RADIX_PASSES,
+    RADIX_TPB,
     SCAN_BLOCK,
     SCAN_NUM_BLOCKS,
+    SCAN_WIDTH,
     SCAN_STEPS,
     SCAN_WIDTH,
     Z_NEAR,
@@ -55,11 +66,12 @@ from config import (
     layout_n3,
     layout_n4,
     layout_one,
+    layout_radix_sh,
     layout_tiles_flat,
     layout_viewmats,
 )
-from utils_t import Mat3, matmul3x3, quat_to_rotmat, transpose
-from vec import Vec3, Vec4
+from gsplat_kernels.utils_t import Mat3, matmul3x3, quat_to_rotmat, transpose
+from gsplat_kernels.vec import Vec3, Vec4
 
 # Sentinel key for bitonic padding: sorts after every real key.
 comptime KEY_MAX = UInt64(0xFFFFFFFFFFFFFFFF)
@@ -351,6 +363,192 @@ def emit_isects(
             keys[base + w] = (UInt64(tile) << 32) | depth_bits
             vals[base + w] = Int32(g)
             w += 1
+
+
+def radix_histogram(
+    keys: TileTensor[KDTYPE, type_of(layout_isects), MutAnyOrigin],
+    hist: TileTensor[IDTYPE, type_of(layout_cn_flat), MutAnyOrigin],
+    n_items: Int32,
+    shift: Int32,
+    n_blocks: Int32,
+):
+    """Count digit occurrences per block, into a bucket-major histogram.
+
+    `hist` is laid out [digit][block] so that a plain prefix sum over it gives
+    each block the base offset of each of its digits -- which is what makes
+    the scatter stable.
+    """
+    var tid = Int(thread_idx.x)
+    var blk = Int(block_idx.x)
+    var n = Int(n_items)
+
+    var sh = stack_allocation[IDTYPE, address_space = AddressSpace.SHARED](
+        layout_radix_sh
+    )
+    comptime for d in range(RADIX):
+        sh[d * RADIX_TPB + tid] = 0
+    barrier()
+
+    var base = blk * RADIX_EPB + tid * RADIX_EPT
+    for e in range(RADIX_EPT):
+        var idx = base + e
+        if idx < n:
+            var dg = Int(
+                (rebind[Scalar[KDTYPE]](keys[idx]) >> UInt64(Int(shift)))
+                & UInt64(RADIX - 1)
+            )
+            sh[dg * RADIX_TPB + tid] = (
+                rebind[Scalar[IDTYPE]](sh[dg * RADIX_TPB + tid]) + 1
+            )
+    barrier()
+
+    # One thread per digit folds that digit's per-thread counts together.
+    if tid < RADIX:
+        var acc: Int32 = 0
+        for t in range(RADIX_TPB):
+            acc += rebind[Scalar[IDTYPE]](sh[tid * RADIX_TPB + t])
+        hist[tid * Int(n_blocks) + blk] = acc
+
+
+def radix_scatter(
+    keys_in: TileTensor[KDTYPE, type_of(layout_isects), MutAnyOrigin],
+    vals_in: TileTensor[IDTYPE, type_of(layout_isects), MutAnyOrigin],
+    keys_out: TileTensor[KDTYPE, type_of(layout_isects), MutAnyOrigin],
+    vals_out: TileTensor[IDTYPE, type_of(layout_isects), MutAnyOrigin],
+    hist: TileTensor[IDTYPE, type_of(layout_cn_flat), MutAnyOrigin],
+    n_items: Int32,
+    shift: Int32,
+    n_blocks: Int32,
+):
+    """Place each element at its final position for this digit pass.
+
+    Stability -- which LSD radix requires to be correct at all -- comes from
+    summing three offsets that are all in order: the scanned per-(digit, block)
+    base, this thread's slot within the block's run of that digit, and a
+    running count over the thread's own elements, which it walks in order.
+    """
+    var tid = Int(thread_idx.x)
+    var blk = Int(block_idx.x)
+    var n = Int(n_items)
+
+    var sh = stack_allocation[IDTYPE, address_space = AddressSpace.SHARED](
+        layout_radix_sh
+    )
+    comptime for d in range(RADIX):
+        sh[d * RADIX_TPB + tid] = 0
+    barrier()
+
+    var base = blk * RADIX_EPB + tid * RADIX_EPT
+    for e in range(RADIX_EPT):
+        var idx = base + e
+        if idx < n:
+            var dg = Int(
+                (rebind[Scalar[KDTYPE]](keys_in[idx]) >> UInt64(Int(shift)))
+                & UInt64(RADIX - 1)
+            )
+            sh[dg * RADIX_TPB + tid] = (
+                rebind[Scalar[IDTYPE]](sh[dg * RADIX_TPB + tid]) + 1
+            )
+    barrier()
+
+    # Exclusive scan across threads, within each digit row.
+    if tid < RADIX:
+        var run: Int32 = 0
+        for t in range(RADIX_TPB):
+            var c = rebind[Scalar[IDTYPE]](sh[tid * RADIX_TPB + t])
+            sh[tid * RADIX_TPB + t] = run
+            run += c
+    barrier()
+
+    var seen = SIMD[IDTYPE, RADIX](0)
+    for e in range(RADIX_EPT):
+        var idx = base + e
+        if idx < n:
+            var key = rebind[Scalar[KDTYPE]](keys_in[idx])
+            var dg = Int((key >> UInt64(Int(shift))) & UInt64(RADIX - 1))
+            var pos = (
+                Int(rebind[Scalar[IDTYPE]](hist[dg * Int(n_blocks) + blk]))
+                + Int(rebind[Scalar[IDTYPE]](sh[dg * RADIX_TPB + tid]))
+                + Int(seen[dg])
+            )
+            keys_out[pos] = key
+            vals_out[pos] = rebind[Scalar[IDTYPE]](vals_in[idx])
+            seen[dg] += 1
+
+
+def radix_sort_pairs(
+    ctx: DeviceContext,
+    keys_a: TileTensor[KDTYPE, type_of(layout_isects), MutAnyOrigin],
+    vals_a: TileTensor[IDTYPE, type_of(layout_isects), MutAnyOrigin],
+    keys_b: TileTensor[KDTYPE, type_of(layout_isects), MutAnyOrigin],
+    vals_b: TileTensor[IDTYPE, type_of(layout_isects), MutAnyOrigin],
+    hist: TileTensor[IDTYPE, type_of(layout_cn_flat), MutAnyOrigin],
+    hist_off: TileTensor[IDTYPE, type_of(layout_cn_flat), MutAnyOrigin],
+    block_sums: TileTensor[IDTYPE, type_of(layout_blocksums), MutAnyOrigin],
+    scratch: TileTensor[IDTYPE, type_of(layout_one), MutAnyOrigin],
+    keys_a_buf: DeviceBuffer[KDTYPE],
+    vals_a_buf: DeviceBuffer[IDTYPE],
+    keys_b_buf: DeviceBuffer[KDTYPE],
+    vals_b_buf: DeviceBuffer[IDTYPE],
+    n_isects: Int,
+) raises:
+    """Sort (key, value) pairs ascending by key, leaving the result in `a`.
+
+    Ping-pongs a/b once per digit pass. Only the bits the key can actually
+    use are scanned, so this is RADIX_PASSES passes rather than 64/RADIX_BITS.
+    An odd pass count would strand the result in `b`, so it is copied back --
+    callers always read `a` and never have to track parity.
+    """
+    var n_blocks = ceildiv(n_isects, RADIX_EPB)
+    var hist_size = RADIX * n_blocks
+    var scan_blocks = ceildiv(hist_size, SCAN_BLOCK)
+    if scan_blocks > SCAN_WIDTH:
+        raise Error("radix: histogram too large for the two-level scan")
+
+    var parity = 0
+    for p in range(RADIX_PASSES):
+        var shift = Int32(p * RADIX_BITS)
+        if parity == 0:
+            ctx.enqueue_function[radix_histogram](
+                keys_a, hist, Int32(n_isects), shift, Int32(n_blocks),
+                grid_dim=n_blocks, block_dim=RADIX_TPB,
+            )
+        else:
+            ctx.enqueue_function[radix_histogram](
+                keys_b, hist, Int32(n_isects), shift, Int32(n_blocks),
+                grid_dim=n_blocks, block_dim=RADIX_TPB,
+            )
+
+        ctx.enqueue_function[scan_block](
+            hist, hist_off, block_sums, Int32(hist_size),
+            grid_dim=scan_blocks, block_dim=SCAN_BLOCK,
+        )
+        ctx.enqueue_function[scan_block_sums](
+            block_sums, scratch, Int32(scan_blocks),
+            grid_dim=1, block_dim=SCAN_WIDTH,
+        )
+        ctx.enqueue_function[add_block_offsets](
+            hist_off, block_sums, Int32(hist_size),
+            grid_dim=scan_blocks, block_dim=SCAN_BLOCK,
+        )
+
+        if parity == 0:
+            ctx.enqueue_function[radix_scatter](
+                keys_a, vals_a, keys_b, vals_b, hist_off,
+                Int32(n_isects), shift, Int32(n_blocks),
+                grid_dim=n_blocks, block_dim=RADIX_TPB,
+            )
+        else:
+            ctx.enqueue_function[radix_scatter](
+                keys_b, vals_b, keys_a, vals_a, hist_off,
+                Int32(n_isects), shift, Int32(n_blocks),
+                grid_dim=n_blocks, block_dim=RADIX_TPB,
+            )
+        parity = 1 - parity
+
+    if parity == 1:
+        ctx.enqueue_copy(dst_buf=keys_a_buf, src_buf=keys_b_buf)
+        ctx.enqueue_copy(dst_buf=vals_a_buf, src_buf=vals_b_buf)
 
 
 def bitonic_step(

@@ -22,7 +22,7 @@ from std.sys import has_accelerator
 from max.gpu.host import DeviceContext
 from layout import TileTensor
 
-from config import (
+from gsplat_kernels.config import (
     C,
     CX,
     CY,
@@ -32,9 +32,12 @@ from config import (
     KDTYPE,
     MAX_ISECTS,
     MIN_ALPHA,
+    N_ISECT_TEST,
     N_MAX,
-    N_TEST,
     N_TILES,
+    RADIX,
+    RADIX_EPB,
+    RADIX_PASSES,
     N_TILES_X,
     N_TILES_Y,
     SCAN_BLOCK,
@@ -56,13 +59,14 @@ from config import (
     layout_tiles_flat,
     layout_viewmats,
 )
-from operations.intersect import (
+from gsplat_kernels.intersect import (
     KEY_MAX,
     SPLAT_DILATION,
     add_block_offsets,
     bitonic_step,
     emit_isects,
     project_and_count,
+    radix_sort_pairs,
     scan_block,
     scan_block_sums,
     write_tile_offsets,
@@ -77,11 +81,11 @@ from scene import (
     view_rot,
     view_trans,
 )
-from utils_t import Mat3, matmul3x3, quat_to_rotmat, transpose
-from vec import Vec3, Vec4
+from gsplat_kernels.utils_t import Mat3, matmul3x3, quat_to_rotmat, transpose
+from gsplat_kernels.vec import Vec3, Vec4
 
 
-def ref_bbox(g: Int) -> Tuple[Int, Int, Int, Int, Float32]:
+def ref_bbox(g: Int, n_total: Int) -> Tuple[Int, Int, Int, Int, Float32]:
     """Host recomputation of one gaussian's tile bbox. Returns (x0,y0,x1,y1,z);
     an empty box (x1<=x0) means the gaussian is culled."""
     var rv = Mat3()
@@ -89,7 +93,11 @@ def ref_bbox(g: Int) -> Tuple[Int, Int, Int, Int, Float32]:
         comptime for c in range(3):
             rv[r, c] = view_rot(r, c)
     var tv = Vec3(view_trans(0), view_trans(1), view_trans(2))
-    var mean = Vec3(spread_mean(g, 0), spread_mean(g, 1), spread_mean(g, 2))
+    var mean = Vec3(
+        spread_mean(g, 0, n_total),
+        spread_mean(g, 1, n_total),
+        spread_mean(g, 2, n_total),
+    )
     var pc = rv * mean + tv
     var z = pc[2]
     if z < Z_NEAR:
@@ -165,7 +173,7 @@ def main() raises:
         C * N_MAX <= SCAN_BLOCK * SCAN_WIDTH
     ), "two-level scan cannot cover C*N_MAX"
 
-    var n_gauss = N_TEST
+    var n_gauss = N_ISECT_TEST
     var ctx = DeviceContext()
 
     var means_buf = ctx.enqueue_create_buffer[DTYPE](N_MAX * 3)
@@ -194,7 +202,7 @@ def main() raises:
     for g in range(n_gauss):
         var qn = spread_quat_norm(g)
         comptime for a in range(3):
-            means_h[g * 3 + a] = spread_mean(g, a)
+            means_h[g * 3 + a] = spread_mean(g, a, n_gauss)
             scales_h[g * 3 + a] = spread_scale(g, a)
         comptime for a in range(4):
             quats_h[g * 4 + a] = spread_quat(g, a) / qn
@@ -274,34 +282,82 @@ def main() raises:
     var n_pow2 = 1
     while n_pow2 < n_isects:
         n_pow2 *= 2
+
+    # Radix works on exactly n elements; the bitonic cross-check needs a
+    # power-of-two span, so allocate to that and let the tail stay KEY_MAX.
     var keys_buf = ctx.enqueue_create_buffer[KDTYPE](n_pow2)
     var vals_buf = ctx.enqueue_create_buffer[IDTYPE](n_pow2)
-    keys_buf.enqueue_fill(KEY_MAX)  # padding sorts to the end
+    var keys_alt_buf = ctx.enqueue_create_buffer[KDTYPE](n_pow2)
+    var vals_alt_buf = ctx.enqueue_create_buffer[IDTYPE](n_pow2)
+    var keys_bit_buf = ctx.enqueue_create_buffer[KDTYPE](n_pow2)
+    var vals_bit_buf = ctx.enqueue_create_buffer[IDTYPE](n_pow2)
+    keys_buf.enqueue_fill(KEY_MAX)
+    keys_alt_buf.enqueue_fill(KEY_MAX)
+    keys_bit_buf.enqueue_fill(KEY_MAX)
     vals_buf.enqueue_fill(-1)
+    vals_alt_buf.enqueue_fill(-1)
+    vals_bit_buf.enqueue_fill(-1)
+
+    var n_rblocks = ceildiv(n_isects, RADIX_EPB)
+    var hist_size = RADIX * n_rblocks
+    var hist_buf = ctx.enqueue_create_buffer[IDTYPE](hist_size)
+    var histoff_buf = ctx.enqueue_create_buffer[IDTYPE](hist_size)
+    var scratch_buf = ctx.enqueue_create_buffer[IDTYPE](1)
+
     var keys = TileTensor(keys_buf, layout_isects)
     var vals = TileTensor(vals_buf, layout_isects)
+    var keys_alt = TileTensor(keys_alt_buf, layout_isects)
+    var vals_alt = TileTensor(vals_alt_buf, layout_isects)
+    var keys_bit = TileTensor(keys_bit_buf, layout_isects)
+    var vals_bit = TileTensor(vals_bit_buf, layout_isects)
+    var hist = TileTensor(hist_buf, layout_cn_flat)
+    var hist_off = TileTensor(histoff_buf, layout_cn_flat)
+    var scratch = TileTensor(scratch_buf, layout_one)
 
     ctx.enqueue_function[emit_isects](
         bboxes, depths, offsets, counts, keys, vals,
         Int32(n_gauss), Int32(N_TILES_X), Int32(N_TILES),
         grid_dim=(gblocks, C), block_dim=TPB,
     )
+    # snapshot the unsorted pairs for the bitonic cross-check
+    ctx.enqueue_copy(dst_buf=keys_bit_buf, src_buf=keys_buf)
+    ctx.enqueue_copy(dst_buf=vals_bit_buf, src_buf=vals_buf)
 
-    # Bitonic sort needs a power-of-two span; the tail is already KEY_MAX.
+    radix_sort_pairs(
+        ctx, keys, vals, keys_alt, vals_alt,
+        hist, hist_off, block_sums, scratch,
+        keys_buf, vals_buf, keys_alt_buf, vals_alt_buf, n_isects,
+    )
+    print("radix:", RADIX_PASSES, "passes over", n_rblocks, "blocks")
+
+    # Independent sort of the same data, to check the radix sort against.
     var sort_blocks = ceildiv(n_pow2, TPB)
-    var passes = 0
     var k = 2
     while k <= n_pow2:
         var j = k // 2
         while j > 0:
             ctx.enqueue_function[bitonic_step](
-                keys, vals, Int32(n_pow2), Int32(k), Int32(j),
+                keys_bit, vals_bit, Int32(n_pow2), Int32(k), Int32(j),
                 grid_dim=sort_blocks, block_dim=TPB,
             )
-            passes += 1
             j //= 2
         k *= 2
-    print("bitonic: padded to", n_pow2, "in", passes, "passes")
+    ctx.synchronize()
+
+    var sort_diff = 0
+    with keys_buf.map_to_host() as rk:
+        with vals_buf.map_to_host() as rv:
+            with keys_bit_buf.map_to_host() as bk:
+                with vals_bit_buf.map_to_host() as bv:
+                    for i in range(n_isects):
+                        if rk[i] != bk[i]:
+                            sort_diff += 1
+                        elif rv[i] != bv[i]:
+                            # only a real disagreement if the keys are unique
+                            if i == 0 or rk[i] != rk[i - 1]:
+                                if i + 1 >= n_isects or rk[i] != rk[i + 1]:
+                                    sort_diff += 1
+    print("radix vs bitonic: ", sort_diff, "differing slots of", n_isects)
 
     tileoff_buf.enqueue_fill(Int32(n_isects))
     ctx.enqueue_function[write_tile_offsets](
@@ -320,7 +376,7 @@ def main() raises:
     var by1 = List[Int]()
     var bz = List[Float32]()
     for g in range(n_gauss):
-        var r = ref_bbox(g)
+        var r = ref_bbox(g, n_gauss)
         bx0.append(r[0]); by0.append(r[1])
         bx1.append(r[2]); by1.append(r[3]); bz.append(r[4])
     var ref_total = 0
@@ -395,7 +451,8 @@ def main() raises:
         and bad_sets == 0
         and bad_order == 0
         and nonempty > 0
+        and sort_diff == 0
     ):
-        print("PASS: binning and depth sort match the host reference exactly")
+        print("PASS: binning matches the host reference, and the radix sort agrees with bitonic")
     else:
         raise Error("FAIL: intersection stage disagrees with the reference")

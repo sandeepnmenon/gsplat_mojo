@@ -7,7 +7,7 @@ reproducible.
 
 from std.math import cos, sin, sqrt
 
-from config import CDIM, DTYPE, N_TEST
+from gsplat_kernels.config import CDIM, DTYPE
 
 comptime GOLDEN_ANGLE: Float32 = 2.399963  # spreads points evenly on a disc
 
@@ -44,11 +44,11 @@ def spread_depth(g: Int) -> Float32:
     return 2.0 + 3.0 * rnd(g, 11)
 
 
-def spread_mean(g: Int, axis: Int) -> Float32:
+def spread_mean(g: Int, axis: Int, n_total: Int) -> Float32:
     """Mean placed so the gaussian lands at a spiral position on screen."""
     var z = spread_depth(g)
     var ang = Float32(g) * GOLDEN_ANGLE
-    var rad = 0.55 * sqrt(Float32(g + 1) / Float32(N_TEST))
+    var rad = 0.55 * sqrt(Float32(g + 1) / Float32(n_total))
     if axis == 0:
         return rad * cos(ang) * z
     elif axis == 1:

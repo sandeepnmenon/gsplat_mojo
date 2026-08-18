@@ -4,6 +4,7 @@ Kept in one module so the rasterizer and the tile-intersection stage agree on
 sizes and layouts without importing each other.
 """
 
+from std.bit import log2_floor
 from std.math import ceildiv
 from layout import row_major
 
@@ -21,6 +22,11 @@ comptime N_MAX = 400000
 # Size of the synthetic scenes used by the self-checks. Unrelated to N_MAX,
 # which is only the allocation capacity.
 comptime N_TEST = 24
+
+# The intersection test uses a bigger scene than the rasterizer test: it needs
+# enough intersections to span several radix blocks (RADIX_EPB each), so that
+# cross-block stability of the sort is actually exercised.
+comptime N_ISECT_TEST = 160
 comptime CDIM = 3  # color channels (RGB)
 comptime IMG_W = 1024
 comptime IMG_H = 768
@@ -62,6 +68,19 @@ comptime SCAN_STEPS = 10  # log2(SCAN_WIDTH)
 comptime SCAN_BLOCK = SCAN_WIDTH
 comptime SCAN_NUM_BLOCKS = ceildiv(C * N_MAX, SCAN_BLOCK)
 comptime SCAN_CAPACITY = SCAN_BLOCK * SCAN_WIDTH
+
+# LSD radix sort geometry. Digits are RADIX_BITS wide; only the bits the key
+# actually uses are passed over. The key is (tile << 32) | float_bits(depth),
+# so that is 32 depth bits plus however many the tile index needs.
+comptime RADIX_BITS = 4
+comptime RADIX = 1 << RADIX_BITS
+comptime RADIX_TPB = 256
+comptime RADIX_EPT = 8  # elements per thread
+comptime RADIX_EPB = RADIX_TPB * RADIX_EPT  # elements per block
+comptime TILE_BITS = log2_floor(C * N_TILES - 1) + 1
+comptime KEY_BITS = 32 + TILE_BITS
+comptime RADIX_PASSES = ceildiv(KEY_BITS, RADIX_BITS)
+comptime layout_radix_sh = row_major[RADIX * RADIX_TPB]()
 
 comptime layout_n3 = row_major[N_MAX, 3]()
 comptime layout_n4 = row_major[N_MAX, 4]()

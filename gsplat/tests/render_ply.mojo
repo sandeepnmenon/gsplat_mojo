@@ -16,7 +16,7 @@ from std.sys import has_accelerator
 from max.gpu.host import DeviceContext
 from layout import TileTensor
 
-from config import (
+from gsplat_kernels.config import (
     C,
     CDIM,
     DTYPE,
@@ -28,6 +28,9 @@ from config import (
     MIN_ALPHA,
     N_MAX,
     N_TILES,
+    RADIX,
+    RADIX_EPB,
+    RADIX_PASSES,
     N_TILES_X,
     N_TILES_Y,
     SCAN_BLOCK,
@@ -57,18 +60,18 @@ from config import (
     layout_tiles_flat,
     layout_viewmats,
 )
-from operations.gsplat_forward import rasterize_to_pixels_from_world_3dgs_fwd
-from operations.intersect import (
+from gsplat_kernels.rasterize import rasterize_to_pixels_from_world_3dgs_fwd
+from gsplat_kernels.intersect import (
     KEY_MAX,
     add_block_offsets,
-    bitonic_step,
     emit_isects,
     project_and_count,
+    radix_sort_pairs,
     scan_block,
     scan_block_sums,
     write_tile_offsets,
 )
-from ply import load_ply
+from gsplat_kernels.ply import load_ply
 from refmath import _ref_rho2, _ref_rho2_f64
 
 comptime PLY_PATH = "../assets/christmas_tree.ply"
@@ -169,11 +172,11 @@ def main() raises:
             scales_h[g * 3 + a] = gs.scales[g * 3 + a]
         comptime for a in range(4):
             quats_h[g * 4 + a] = gs.quats[g * 4 + a]
+        comptime for k in range(CDIM):
+            colors_h[g * CDIM + k] = gs.colors[g * CDIM + k]
     for c in range(C):
         for g in range(n_gauss):
             opac_h[c * N_MAX + g] = gs.opacities[g]
-            comptime for k in range(CDIM):
-                colors_h[(c * N_MAX + g) * CDIM + k] = gs.colors[g * CDIM + k]
         comptime for k in range(CDIM):
             bg_h[c * CDIM + k] = 0.0  # black background
         for e in range(16):
@@ -266,35 +269,37 @@ def main() raises:
     if n_isects <= 0:
         raise Error("nothing intersected the frame — is the camera pointed at the model?")
 
-    var n_pow2 = 1
-    while n_pow2 < n_isects:
-        n_pow2 *= 2
-    var keys_buf = ctx.enqueue_create_buffer[KDTYPE](n_pow2)
-    var sorted_buf = ctx.enqueue_create_buffer[IDTYPE](n_pow2)
+    # Radix sorts exactly n elements -- no power-of-two padding needed.
+    var n_rblocks = ceildiv(n_isects, RADIX_EPB)
+    var hist_size = RADIX * n_rblocks
+    var keys_buf = ctx.enqueue_create_buffer[KDTYPE](n_isects)
+    var sorted_buf = ctx.enqueue_create_buffer[IDTYPE](n_isects)
+    var keys_alt_buf = ctx.enqueue_create_buffer[KDTYPE](n_isects)
+    var vals_alt_buf = ctx.enqueue_create_buffer[IDTYPE](n_isects)
+    var hist_buf = ctx.enqueue_create_buffer[IDTYPE](hist_size)
+    var histoff_buf = ctx.enqueue_create_buffer[IDTYPE](hist_size)
+    var scratch_buf = ctx.enqueue_create_buffer[IDTYPE](1)
     keys_buf.enqueue_fill(KEY_MAX)
     sorted_buf.enqueue_fill(-1)
     var keys = TileTensor(keys_buf, layout_isects)
     var sorted_ids = TileTensor(sorted_buf, layout_isects)
+    var keys_alt = TileTensor(keys_alt_buf, layout_isects)
+    var vals_alt = TileTensor(vals_alt_buf, layout_isects)
+    var hist = TileTensor(hist_buf, layout_cn_flat)
+    var hist_off = TileTensor(histoff_buf, layout_cn_flat)
+    var scratch = TileTensor(scratch_buf, layout_one)
 
     ctx.enqueue_function[emit_isects](
         bboxes, depths, offsets, counts, keys, sorted_ids,
         Int32(n_gauss), Int32(N_TILES_X), Int32(N_TILES),
         grid_dim=(gblocks, C), block_dim=TPB,
     )
-    var passes = 0
-    var k = 2
-    while k <= n_pow2:
-        var j = k // 2
-        while j > 0:
-            ctx.enqueue_function[bitonic_step](
-                keys, sorted_ids, Int32(n_pow2), Int32(k), Int32(j),
-                grid_dim=ceildiv(n_pow2, TPB), block_dim=TPB,
-            )
-            passes += 1
-            j //= 2
-        k *= 2
-    print("  sorted", n_pow2, "slots in", passes, "bitonic passes")
-
+    print("  radix sort:", RADIX_PASSES, "passes over", n_rblocks, "blocks")
+    radix_sort_pairs(
+        ctx, keys, sorted_ids, keys_alt, vals_alt,
+        hist, hist_off, block_sums, scratch,
+        keys_buf, sorted_buf, keys_alt_buf, vals_alt_buf, n_isects,
+    )
     tileoff_buf.enqueue_fill(Int32(n_isects))
     ctx.enqueue_function[write_tile_offsets](
         keys, tile_offsets_flat, Int32(n_isects),
