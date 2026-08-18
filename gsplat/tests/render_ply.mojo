@@ -33,6 +33,7 @@ from gsplat_kernels.config import (
     RADIX_PASSES,
     N_TILES_X,
     N_TILES_Y,
+    SH_COEFFS,
     SCAN_BLOCK,
     SCAN_NUM_BLOCKS,
     SCAN_WIDTH,
@@ -56,11 +57,13 @@ from gsplat_kernels.config import (
     layout_one,
     layout_render_alphas,
     layout_render_colors,
+    layout_sh,
     layout_tiles,
     layout_tiles_flat,
     layout_viewmats,
 )
 from gsplat_kernels.rasterize import rasterize_to_pixels_from_world_3dgs_fwd
+from gsplat_kernels.spherical_harmonics import compute_colors_from_sh
 from gsplat_kernels.intersect import (
     KEY_MAX,
     add_block_offsets,
@@ -103,7 +106,8 @@ def main() raises:
     print("loading", PLY_PATH)
     var gs = load_ply(PLY_PATH)
     var n_gauss = gs.count
-    print("  gaussians:", n_gauss)
+    print("  gaussians:", n_gauss, "| SH degree", gs.sh_degree,
+          "(", gs.sh_coeffs, "coefficients )")
     if n_gauss > N_MAX:
         raise Error(
             "PLY has more gaussians than N_MAX; raise the capacity in"
@@ -133,6 +137,7 @@ def main() raises:
     var quats_buf = ctx.enqueue_create_buffer[DTYPE](N_MAX * 4)
     var scales_buf = ctx.enqueue_create_buffer[DTYPE](N_MAX * 3)
     var colors_buf = ctx.enqueue_create_buffer[DTYPE](C * N_MAX * CDIM)
+    var sh_buf = ctx.enqueue_create_buffer[DTYPE](n_gauss * SH_COEFFS * 3)
     var opac_buf = ctx.enqueue_create_buffer[DTYPE](C * N_MAX)
     var bg_buf = ctx.enqueue_create_buffer[DTYPE](C * CDIM)
     var masks_buf = ctx.enqueue_create_buffer[IDTYPE](C * N_TILES)
@@ -157,6 +162,7 @@ def main() raises:
     var quats_h = ctx.enqueue_create_host_buffer[DTYPE](N_MAX * 4)
     var scales_h = ctx.enqueue_create_host_buffer[DTYPE](N_MAX * 3)
     var colors_h = ctx.enqueue_create_host_buffer[DTYPE](C * N_MAX * CDIM)
+    var sh_h = ctx.enqueue_create_host_buffer[DTYPE](n_gauss * SH_COEFFS * 3)
     var opac_h = ctx.enqueue_create_host_buffer[DTYPE](C * N_MAX)
     var bg_h = ctx.enqueue_create_host_buffer[DTYPE](C * CDIM)
     var view_h = ctx.enqueue_create_host_buffer[DTYPE](C * 16)
@@ -172,8 +178,13 @@ def main() raises:
             scales_h[g * 3 + a] = gs.scales[g * 3 + a]
         comptime for a in range(4):
             quats_h[g * 4 + a] = gs.quats[g * 4 + a]
-        comptime for k in range(CDIM):
-            colors_h[g * CDIM + k] = gs.colors[g * CDIM + k]
+    for g in range(n_gauss):
+        for i in range(SH_COEFFS):
+            comptime for k in range(3):
+                var v: Float32 = 0.0
+                if i < gs.sh_coeffs:
+                    v = gs.sh[(g * gs.sh_coeffs + i) * 3 + k]
+                sh_h[(g * SH_COEFFS + i) * 3 + k] = v
     for c in range(C):
         for g in range(n_gauss):
             opac_h[c * N_MAX + g] = gs.opacities[g]
@@ -201,7 +212,7 @@ def main() raises:
     ctx.enqueue_copy(dst_buf=means_buf, src_buf=means_h)
     ctx.enqueue_copy(dst_buf=quats_buf, src_buf=quats_h)
     ctx.enqueue_copy(dst_buf=scales_buf, src_buf=scales_h)
-    ctx.enqueue_copy(dst_buf=colors_buf, src_buf=colors_h)
+    ctx.enqueue_copy(dst_buf=sh_buf, src_buf=sh_h)
     ctx.enqueue_copy(dst_buf=opac_buf, src_buf=opac_h)
     ctx.enqueue_copy(dst_buf=bg_buf, src_buf=bg_h)
     ctx.enqueue_copy(dst_buf=view0_buf, src_buf=view_h)
@@ -217,6 +228,7 @@ def main() raises:
     var quats = TileTensor(quats_buf, layout_n4)
     var scales = TileTensor(scales_buf, layout_n3)
     var colors = TileTensor(colors_buf, layout_cn_cdim)
+    var sh = TileTensor(sh_buf, layout_sh)
     var opacities = TileTensor(opac_buf, layout_cn)
     var backgrounds = TileTensor(bg_buf, layout_cdim)
     var masks = TileTensor(masks_buf, layout_tiles)
@@ -243,6 +255,13 @@ def main() raises:
     comptime TPB = 256
     var gblocks = ceildiv(n_gauss, TPB)
 
+    # Colour is view-dependent, so resolve the SH for this camera first; the
+    # rasterizer then reads plain RGB and needs no knowledge of SH.
+    ctx.enqueue_function[compute_colors_from_sh](
+        sh, means, viewmats0, colors,
+        Int32(n_gauss), Int32(gs.sh_degree),
+        grid_dim=(gblocks, C), block_dim=TPB,
+    )
     ctx.enqueue_function[project_and_count](
         means, scales, quats, opacities, viewmats0, ks,
         counts, bboxes, depths,
@@ -266,6 +285,20 @@ def main() raises:
 
     var n_isects = Int(total_h[0])
     print("  tile intersections:", n_isects)
+
+    # Pull the resolved colours back for the host reference. At degree 0 these
+    # must equal the loader's constant colours; that equality is checked below.
+    var colors_view = List[Float32]()
+    var sh_vs_dc: Float32 = 0.0
+    with colors_buf.map_to_host() as ch:
+        for g in range(n_gauss):
+            comptime for k in range(CDIM):
+                var v = ch[g * CDIM + k]
+                colors_view.append(v)
+                var d = abs(v - gs.colors[g * CDIM + k])
+                if d > sh_vs_dc:
+                    sh_vs_dc = d
+    print("  SH-resolved vs order-0 colours: max diff", sh_vs_dc)
     if n_isects <= 0:
         raise Error("nothing intersected the frame — is the camera pointed at the model?")
 
@@ -429,7 +462,7 @@ def main() raises:
                             break
                         chain += 1
                         comptime for kk in range(CDIM):
-                            acc[kk] += a * tr * gs.colors[g * CDIM + kk]
+                            acc[kk] += a * tr * colors_view[g * CDIM + kk]
                         tr = nt
 
                         # the same walk in float64
@@ -452,7 +485,7 @@ def main() raises:
                             if nt64 >= Float64(T_EPS):
                                 comptime for kk in range(CDIM):
                                     acc64[kk] += (
-                                        a64 * tr64 * Float64(gs.colors[g * CDIM + kk])
+                                        a64 * tr64 * Float64(colors_view[g * CDIM + kk])
                                     )
                                 tr64 = nt64
 
