@@ -1,0 +1,204 @@
+{
+  "$id": "https://github.com/sandeepnmenon/gsplat_mojo/benchmarks/phase0-ray-baseline.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "benchmark": {
+      "additionalProperties": false,
+      "properties": {
+        "comparison": {
+          "const": "self-baseline-only"
+        },
+        "name": {
+          "const": "gsplat-mojo-phase0-ray-self-baseline"
+        },
+        "renderer": {
+          "const": "ray"
+        },
+        "upstream_gsplat_used": {
+          "const": false
+        }
+      },
+      "required": [
+        "name",
+        "renderer",
+        "comparison",
+        "upstream_gsplat_used"
+      ],
+      "type": "object"
+    },
+    "captured_at_utc": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "counts": {
+      "additionalProperties": false,
+      "properties": {
+        "gaussians": {
+          "maximum": 400000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "intersections": {
+          "additionalProperties": false,
+          "properties": {
+            "available": {
+              "type": "boolean"
+            },
+            "count": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "reason": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "available",
+            "count",
+            "reason"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "gaussians",
+        "intersections"
+      ],
+      "type": "object"
+    },
+    "environment": {
+      "additionalProperties": false,
+      "properties": {
+        "gpu": {
+          "type": "object"
+        },
+        "software": {
+          "type": "object"
+        },
+        "source": {
+          "type": "object"
+        },
+        "system": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "system",
+        "gpu",
+        "software",
+        "source"
+      ],
+      "type": "object"
+    },
+    "limitations": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "memory": {
+      "additionalProperties": false,
+      "properties": {
+        "cold_device": {
+          "type": "object"
+        },
+        "torch_allocator": {
+          "type": "object"
+        },
+        "warm_device": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "cold_device",
+        "warm_device",
+        "torch_allocator"
+      ],
+      "type": "object"
+    },
+    "policy": {
+      "additionalProperties": false,
+      "properties": {
+        "cold": {
+          "type": "object"
+        },
+        "measured_calls": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "timer": {
+          "type": "string"
+        },
+        "warm_synchronization": {
+          "type": "string"
+        },
+        "warmup_calls": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "cold",
+        "warmup_calls",
+        "measured_calls",
+        "warm_synchronization",
+        "timer"
+      ],
+      "type": "object"
+    },
+    "result": {
+      "type": "object"
+    },
+    "schema_version": {
+      "const": "1.0.0"
+    },
+    "timing": {
+      "additionalProperties": false,
+      "properties": {
+        "cold_jit": {
+          "type": "object"
+        },
+        "per_stage": {
+          "type": "object"
+        },
+        "warm_end_to_end": {
+          "type": "object"
+        }
+      },
+      "required": [
+        "cold_jit",
+        "warm_end_to_end",
+        "per_stage"
+      ],
+      "type": "object"
+    },
+    "workload": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "$schema",
+    "schema_version",
+    "benchmark",
+    "captured_at_utc",
+    "environment",
+    "workload",
+    "policy",
+    "counts",
+    "timing",
+    "memory",
+    "result",
+    "limitations"
+  ],
+  "title": "gsplat-mojo Phase 0 ray self-baseline",
+  "type": "object"
+}
