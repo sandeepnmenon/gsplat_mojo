@@ -48,6 +48,15 @@ packages = ["src/gsplat_mojo"]
 
 [tool.hatch.build.targets.sdist]
 include = [
+  "ACKNOWLEDGEMENTS.md",
+  "CHANGELOG.md",
+  "CITATION.cff",
+  "CODE_OF_CONDUCT.md",
+  "CONTRIBUTING.md",
+  "ROADMAP.md",
+  "SECURITY.md",
+  "SUPPORT.md",
+  "assets/README.md",
   "benchmarks",
   "docs",
   "gsplat/gsplat_kernels",
