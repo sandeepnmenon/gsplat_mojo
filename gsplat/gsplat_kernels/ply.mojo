@@ -121,7 +121,8 @@ def load_ply(path: String) raises -> PlyGaussians:
             if len(tok) < 3 or String(tok[1]) != "float":
                 raise Error(
                     "ply: only all-float32 vertex properties are supported,"
-                    " got: " + line
+                    " got: "
+                    + line
                 )
             var name = String(tok[2])
             for slot in range(len(wanted)):
@@ -199,20 +200,20 @@ def load_ply(path: String) raises -> PlyGaussians:
     for v in range(n_verts):
         var b = base_f + v * n_props
 
-        means.append(fp[unsafe_offset = b + ix])
-        means.append(fp[unsafe_offset = b + iy])
-        means.append(fp[unsafe_offset = b + iz])
+        means.append(fp[unsafe_offset=b + ix])
+        means.append(fp[unsafe_offset=b + iy])
+        means.append(fp[unsafe_offset=b + iz])
 
         # log-scale -> linear
-        scales.append(exp(fp[unsafe_offset = b + is0]))
-        scales.append(exp(fp[unsafe_offset = b + is1]))
-        scales.append(exp(fp[unsafe_offset = b + is2]))
+        scales.append(exp(fp[unsafe_offset=b + is0]))
+        scales.append(exp(fp[unsafe_offset=b + is1]))
+        scales.append(exp(fp[unsafe_offset=b + is2]))
 
         # (w, x, y, z) in the file -> (x, y, z, w) here, normalized
-        var qw = fp[unsafe_offset = b + ir0]
-        var qx = fp[unsafe_offset = b + ir1]
-        var qy = fp[unsafe_offset = b + ir2]
-        var qz = fp[unsafe_offset = b + ir3]
+        var qw = fp[unsafe_offset=b + ir0]
+        var qx = fp[unsafe_offset=b + ir1]
+        var qy = fp[unsafe_offset=b + ir2]
+        var qz = fp[unsafe_offset=b + ir3]
         var qn = sqrt(qw * qw + qx * qx + qy * qy + qz * qz)
         if qn <= 0.0:
             qx = 0.0
@@ -226,28 +227,28 @@ def load_ply(path: String) raises -> PlyGaussians:
         quats.append(qw / qn)
 
         # Raw SH coefficients, coefficient-major: [coeff][channel].
-        sh.append(fp[unsafe_offset = b + idc0])
-        sh.append(fp[unsafe_offset = b + idc1])
-        sh.append(fp[unsafe_offset = b + idc2])
+        sh.append(fp[unsafe_offset=b + idc0])
+        sh.append(fp[unsafe_offset=b + idc1])
+        sh.append(fp[unsafe_offset=b + idc2])
         for c in range(rest_per_channel):
             for ch in range(3):
                 sh.append(
-                    fp[unsafe_offset = b + frest_index[ch * rest_per_channel + c]]
+                    fp[unsafe_offset=b + frest_index[ch * rest_per_channel + c]]
                 )
 
         # order-0 SH -> linear RGB
         colors.append(
-            (SH_C0 * fp[unsafe_offset = b + idc0] + 0.5).clamp(0.0, 1.0)
+            (SH_C0 * fp[unsafe_offset=b + idc0] + 0.5).clamp(0.0, 1.0)
         )
         colors.append(
-            (SH_C0 * fp[unsafe_offset = b + idc1] + 0.5).clamp(0.0, 1.0)
+            (SH_C0 * fp[unsafe_offset=b + idc1] + 0.5).clamp(0.0, 1.0)
         )
         colors.append(
-            (SH_C0 * fp[unsafe_offset = b + idc2] + 0.5).clamp(0.0, 1.0)
+            (SH_C0 * fp[unsafe_offset=b + idc2] + 0.5).clamp(0.0, 1.0)
         )
 
         # logit -> probability
-        opacities.append(1.0 / (1.0 + exp(-fp[unsafe_offset = b + iop])))
+        opacities.append(1.0 / (1.0 + exp(-fp[unsafe_offset=b + iop])))
 
     return PlyGaussians(
         count=n_verts,

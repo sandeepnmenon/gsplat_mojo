@@ -54,7 +54,9 @@ def _sh_coeff(
 
 
 def compute_colors_from_sh(
-    sh: TileTensor[DTYPE, type_of(layout_sh), MutAnyOrigin],  # [N, SH_COEFFS, 3]
+    sh: TileTensor[
+        DTYPE, type_of(layout_sh), MutAnyOrigin
+    ],  # [N, SH_COEFFS, 3]
     means: TileTensor[DTYPE, type_of(layout_n3), MutAnyOrigin],
     viewmats: TileTensor[DTYPE, type_of(layout_viewmats), MutAnyOrigin],
     colors: TileTensor[DTYPE, type_of(layout_cn_cdim), MutAnyOrigin],
@@ -121,11 +123,15 @@ def compute_colors_from_sh(
             if deg >= 3:
                 acc += _sh_coeff(sh, g, 9) * (SH_C3_0 * y * (3.0 * xx - yy))
                 acc += _sh_coeff(sh, g, 10) * (SH_C3_1 * xy * z)
-                acc += _sh_coeff(sh, g, 11) * (SH_C3_2 * y * (4.0 * zz - xx - yy))
+                acc += _sh_coeff(sh, g, 11) * (
+                    SH_C3_2 * y * (4.0 * zz - xx - yy)
+                )
                 acc += _sh_coeff(sh, g, 12) * (
                     SH_C3_3 * z * (2.0 * zz - 3.0 * xx - 3.0 * yy)
                 )
-                acc += _sh_coeff(sh, g, 13) * (SH_C3_4 * x * (4.0 * zz - xx - yy))
+                acc += _sh_coeff(sh, g, 13) * (
+                    SH_C3_4 * x * (4.0 * zz - xx - yy)
+                )
                 acc += _sh_coeff(sh, g, 14) * (SH_C3_5 * z * (xx - yy))
                 acc += _sh_coeff(sh, g, 15) * (SH_C3_6 * x * (xx - 3.0 * yy))
 

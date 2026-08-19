@@ -76,7 +76,6 @@ from gsplat_kernels.utils_t import Mat3, matmul3x3, quat_to_rotmat, transpose
 from gsplat_kernels.vec import Vec3, Vec4
 
 
-
 @fieldwise_init
 struct SE3(Copyable, ImplicitlyCopyable, Movable):
     var rotation: Mat3
@@ -87,7 +86,8 @@ def extract_se3(
     viewmats: TileTensor[DTYPE, type_of(layout_viewmats), MutAnyOrigin],
     cid: Int,
 ) -> SE3:
-    """Pull the rotation block and translation column out of a [4, 4] view matrix."""
+    """Pull the rotation block and translation column out of a [4, 4] view matrix.
+    """
     comptime assert viewmats.flat_rank == 3
     var rotation = Mat3()
     comptime for r in range(3):
@@ -135,10 +135,16 @@ def rasterize_to_pixels_from_world_3dgs_fwd(
     means: TileTensor[DTYPE, type_of(layout_n3), MutAnyOrigin],  # [N, 3]
     quats: TileTensor[DTYPE, type_of(layout_n4), MutAnyOrigin],  # [N, 4]
     scales: TileTensor[DTYPE, type_of(layout_n3), MutAnyOrigin],  # [N, 3]
-    colors: TileTensor[DTYPE, type_of(layout_cn_cdim), MutAnyOrigin],  # [C, N, CDIM]
+    colors: TileTensor[
+        DTYPE, type_of(layout_cn_cdim), MutAnyOrigin
+    ],  # [C, N, CDIM]
     opacities: TileTensor[DTYPE, type_of(layout_cn), MutAnyOrigin],  # [C, N]
-    backgrounds: TileTensor[DTYPE, type_of(layout_cdim), MutAnyOrigin],  # [C, CDIM]
-    masks: TileTensor[IDTYPE, type_of(layout_tiles), MutAnyOrigin],  # [C, TY, TX]
+    backgrounds: TileTensor[
+        DTYPE, type_of(layout_cdim), MutAnyOrigin
+    ],  # [C, CDIM]
+    masks: TileTensor[
+        IDTYPE, type_of(layout_tiles), MutAnyOrigin
+    ],  # [C, TY, TX]
     has_backgrounds: Int32,  # Bool is not DevicePassable
     has_masks: Int32,
     image_width: Int32,
@@ -149,7 +155,9 @@ def rasterize_to_pixels_from_world_3dgs_fwd(
     # camera model
     viewmats0: TileTensor[DTYPE, type_of(layout_viewmats), MutAnyOrigin],
     viewmats1: TileTensor[DTYPE, type_of(layout_viewmats), MutAnyOrigin],
-    Ks: TileTensor[DTYPE, type_of(layout_intrinsics), MutAnyOrigin],  # [C, 3, 3]
+    Ks: TileTensor[
+        DTYPE, type_of(layout_intrinsics), MutAnyOrigin
+    ],  # [C, 3, 3]
     camera_model_type: Int32,
     rs_type: Int32,
     radial_coeffs: TileTensor[DTYPE, type_of(layout_c6), MutAnyOrigin],
@@ -158,8 +166,12 @@ def rasterize_to_pixels_from_world_3dgs_fwd(
     # intersections
     tile_offsets: TileTensor[IDTYPE, type_of(layout_tiles), MutAnyOrigin],
     flatten_ids: TileTensor[IDTYPE, type_of(layout_isects), MutAnyOrigin],
-    render_colors: TileTensor[DTYPE, type_of(layout_render_colors), MutAnyOrigin],
-    render_alphas: TileTensor[DTYPE, type_of(layout_render_alphas), MutAnyOrigin],
+    render_colors: TileTensor[
+        DTYPE, type_of(layout_render_colors), MutAnyOrigin
+    ],
+    render_alphas: TileTensor[
+        DTYPE, type_of(layout_render_alphas), MutAnyOrigin
+    ],
     last_ids: TileTensor[IDTYPE, type_of(layout_last_ids), MutAnyOrigin],
 ):
     comptime assert CDIM <= 4, "pixel accumulator is a 4-lane SIMD"
@@ -224,7 +236,10 @@ def rasterize_to_pixels_from_world_3dgs_fwd(
 
     # A masked-out tile is uniform across the block, so returning here cannot
     # strand some threads of the block at a later barrier().
-    if use_masks and Int(rebind[Scalar[IDTYPE]](masks[cid, tile_row, tile_col])) == 0:
+    if (
+        use_masks
+        and Int(rebind[Scalar[IDTYPE]](masks[cid, tile_row, tile_col])) == 0
+    ):
         if inside:
             comptime for k in range(CDIM):
                 var bg: Float32 = 0.0
@@ -237,7 +252,9 @@ def rasterize_to_pixels_from_world_3dgs_fwd(
 
     # Range of this tile's gaussians inside flatten_ids. The end is the next
     # tile's start, walking the flattened [C, TY, TX] order.
-    var range_start = Int(rebind[Scalar[IDTYPE]](tile_offsets[cid, tile_row, tile_col]))
+    var range_start = Int(
+        rebind[Scalar[IDTYPE]](tile_offsets[cid, tile_row, tile_col])
+    )
     var range_end: Int
     if cid == n_cams - 1 and tile_id == twidth * theight - 1:
         range_end = total_isects
@@ -249,22 +266,20 @@ def rasterize_to_pixels_from_world_3dgs_fwd(
             next_cid = cid + 1
         range_end = Int(
             rebind[Scalar[IDTYPE]](
-                tile_offsets[
-                    next_cid, next_tile // twidth, next_tile % twidth
-                ]
+                tile_offsets[next_cid, next_tile // twidth, next_tile % twidth]
             )
         )
 
     var num_batches = ceildiv(range_end - range_start, BLOCK_SIZE)
 
-    var id_batch = stack_allocation[
-        IDTYPE, address_space = AddressSpace.SHARED
-    ](row_major[BLOCK_SIZE]())
+    var id_batch = stack_allocation[IDTYPE, address_space=AddressSpace.SHARED](
+        row_major[BLOCK_SIZE]()
+    )
     var xyz_opacity_batch = stack_allocation[
-        DTYPE, address_space = AddressSpace.SHARED
+        DTYPE, address_space=AddressSpace.SHARED
     ](row_major[BLOCK_SIZE, 4]())
     var iscl_rot_batch = stack_allocation[
-        DTYPE, address_space = AddressSpace.SHARED
+        DTYPE, address_space=AddressSpace.SHARED
     ](row_major[BLOCK_SIZE, 3, 3]())
 
     var transmittance: Float32 = 1.0
@@ -347,14 +362,12 @@ def rasterize_to_pixels_from_world_3dgs_fwd(
                             # Pixel is saturated; this gaussian is excluded.
                             done = True
                         else:
-                            var gid = Int(
-                                rebind[Scalar[IDTYPE]](id_batch[t])
-                            )
+                            var gid = Int(rebind[Scalar[IDTYPE]](id_batch[t]))
                             var weight = alpha * transmittance
                             comptime for k in range(CDIM):
-                                pix_out[k] += weight * rebind[
-                                    Scalar[DTYPE]
-                                ](colors[cid, gid, k])
+                                pix_out[k] += weight * rebind[Scalar[DTYPE]](
+                                    colors[cid, gid, k]
+                                )
                             transmittance = next_t
                             cur_idx = Int32(batch_start + t)
             t += 1
@@ -367,5 +380,3 @@ def rasterize_to_pixels_from_world_3dgs_fwd(
                 bg = rebind[Scalar[DTYPE]](backgrounds[cid, k])
             render_colors[cid, i, j, k] = pix_out[k] + transmittance * bg
         last_ids[cid, i, j] = cur_idx
-
-

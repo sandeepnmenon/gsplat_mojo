@@ -114,4 +114,3 @@ comptime layout_cn4 = row_major[C, N_MAX, 4]()  # tile bbox (tx0, ty0, tx1, ty1)
 comptime layout_one = row_major[1]()  # total intersection count
 comptime layout_cn_flat = row_major[C * N_MAX]()  # counts/offsets, flattened
 comptime layout_blocksums = row_major[SCAN_NUM_BLOCKS]()
-

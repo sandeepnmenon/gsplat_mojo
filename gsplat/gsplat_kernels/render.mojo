@@ -81,14 +81,14 @@ struct Render:
     def execute[
         target: StaticString
     ](
-        img_out: OutputTensor[dtype = DType.float32, rank=3, static_spec=_],
-        means: InputTensor[dtype = DType.float32, rank=2, static_spec=_],
-        colors: InputTensor[dtype = DType.float32, rank=2, static_spec=_],
-        opacities: InputTensor[dtype = DType.float32, rank=1, static_spec=_],
-        scales: InputTensor[dtype = DType.float32, rank=2, static_spec=_],
-        quats: InputTensor[dtype = DType.float32, rank=2, static_spec=_],
-        viewmats: InputTensor[dtype = DType.float32, rank=3, static_spec=_],
-        ks: InputTensor[dtype = DType.float32, rank=3, static_spec=_],
+        img_out: OutputTensor[dtype=DType.float32, rank=3, static_spec=_],
+        means: InputTensor[dtype=DType.float32, rank=2, static_spec=_],
+        colors: InputTensor[dtype=DType.float32, rank=2, static_spec=_],
+        opacities: InputTensor[dtype=DType.float32, rank=1, static_spec=_],
+        scales: InputTensor[dtype=DType.float32, rank=2, static_spec=_],
+        quats: InputTensor[dtype=DType.float32, rank=2, static_spec=_],
+        viewmats: InputTensor[dtype=DType.float32, rank=3, static_spec=_],
+        ks: InputTensor[dtype=DType.float32, rank=3, static_spec=_],
         ctx: DeviceContext,
     ) raises:
         comptime if target != "gpu":
@@ -97,7 +97,10 @@ struct Render:
         var n_gauss = Int(means.dim_size(0))
         if n_gauss <= 0 or n_gauss > N_MAX:
             raise Error("render: gaussian count outside the configured N_MAX")
-        if Int(img_out.dim_size(0)) != IMG_H or Int(img_out.dim_size(1)) != IMG_W:
+        if (
+            Int(img_out.dim_size(0)) != IMG_H
+            or Int(img_out.dim_size(1)) != IMG_W
+        ):
             raise Error("render: output size does not match the build config")
         if Int(img_out.dim_size(2)) != CDIM:
             raise Error("render: output channel count does not match CDIM")
@@ -167,22 +170,43 @@ struct Render:
         var gblocks = ceildiv(n_gauss, TPB)
 
         ctx.enqueue_function[project_and_count](
-            means_t, scales_t, quats_t, opac_t, view_t, ks_t,
-            counts, bboxes, depths,
-            Int32(n_gauss), Int32(N_TILES_X), Int32(N_TILES_Y), Int32(TILE),
-            grid_dim=(gblocks, C), block_dim=TPB,
+            means_t,
+            scales_t,
+            quats_t,
+            opac_t,
+            view_t,
+            ks_t,
+            counts,
+            bboxes,
+            depths,
+            Int32(n_gauss),
+            Int32(N_TILES_X),
+            Int32(N_TILES_Y),
+            Int32(TILE),
+            grid_dim=(gblocks, C),
+            block_dim=TPB,
         )
         ctx.enqueue_function[scan_block](
-            counts_flat, offsets_flat, block_sums, Int32(C * N_MAX),
-            grid_dim=SCAN_NUM_BLOCKS, block_dim=SCAN_BLOCK,
+            counts_flat,
+            offsets_flat,
+            block_sums,
+            Int32(C * N_MAX),
+            grid_dim=SCAN_NUM_BLOCKS,
+            block_dim=SCAN_BLOCK,
         )
         ctx.enqueue_function[scan_block_sums](
-            block_sums, total, Int32(SCAN_NUM_BLOCKS),
-            grid_dim=1, block_dim=1024,
+            block_sums,
+            total,
+            Int32(SCAN_NUM_BLOCKS),
+            grid_dim=1,
+            block_dim=1024,
         )
         ctx.enqueue_function[add_block_offsets](
-            offsets_flat, block_sums, Int32(C * N_MAX),
-            grid_dim=SCAN_NUM_BLOCKS, block_dim=SCAN_BLOCK,
+            offsets_flat,
+            block_sums,
+            Int32(C * N_MAX),
+            grid_dim=SCAN_NUM_BLOCKS,
+            block_dim=SCAN_BLOCK,
         )
         ctx.enqueue_copy(dst_buf=total_h, src_buf=total_buf)
         ctx.synchronize()  # the sort has to be sized before it can be issued
@@ -215,30 +239,74 @@ struct Render:
         tileoff_buf.enqueue_fill(Int32(n_isects))
         if n_isects > 0:
             ctx.enqueue_function[emit_isects](
-                bboxes, depths, offsets, counts, keys, vals,
-                Int32(n_gauss), Int32(N_TILES_X), Int32(N_TILES),
-                grid_dim=(gblocks, C), block_dim=TPB,
+                bboxes,
+                depths,
+                offsets,
+                counts,
+                keys,
+                vals,
+                Int32(n_gauss),
+                Int32(N_TILES_X),
+                Int32(N_TILES),
+                grid_dim=(gblocks, C),
+                block_dim=TPB,
             )
             radix_sort_pairs(
-                ctx, keys, vals, keys_alt, vals_alt,
-                hist, hist_off, block_sums, scratch,
-                keys_buf, vals_buf, keys_alt_buf, vals_alt_buf, n_isects,
+                ctx,
+                keys,
+                vals,
+                keys_alt,
+                vals_alt,
+                hist,
+                hist_off,
+                block_sums,
+                scratch,
+                keys_buf,
+                vals_buf,
+                keys_alt_buf,
+                vals_alt_buf,
+                n_isects,
             )
             ctx.enqueue_function[write_tile_offsets](
-                keys, tile_offsets_flat, Int32(n_isects),
-                grid_dim=ceildiv(n_isects, TPB), block_dim=TPB,
+                keys,
+                tile_offsets_flat,
+                Int32(n_isects),
+                grid_dim=ceildiv(n_isects, TPB),
+                block_dim=TPB,
             )
 
         ctx.enqueue_function[rasterize_to_pixels_from_world_3dgs_fwd](
-            Int32(C), Int32(n_gauss), Int32(n_isects), Int32(0),
-            means_t, quats_t, scales_t, colors_t, opac_t, backgrounds, masks,
-            Int32(1), Int32(1),
-            Int32(IMG_W), Int32(IMG_H), Int32(TILE),
-            Int32(N_TILES_X), Int32(N_TILES_Y),
-            view_t, viewmats1, ks_t,
-            Int32(0), Int32(0),
-            radial, tangential, thin_prims,
-            tile_offsets, vals,
-            out_t, render_alphas, last_ids,
-            grid_dim=(N_TILES_X, N_TILES_Y, C), block_dim=(TILE, TILE, 1),
+            Int32(C),
+            Int32(n_gauss),
+            Int32(n_isects),
+            Int32(0),
+            means_t,
+            quats_t,
+            scales_t,
+            colors_t,
+            opac_t,
+            backgrounds,
+            masks,
+            Int32(1),
+            Int32(1),
+            Int32(IMG_W),
+            Int32(IMG_H),
+            Int32(TILE),
+            Int32(N_TILES_X),
+            Int32(N_TILES_Y),
+            view_t,
+            viewmats1,
+            ks_t,
+            Int32(0),
+            Int32(0),
+            radial,
+            tangential,
+            thin_prims,
+            tile_offsets,
+            vals,
+            out_t,
+            render_alphas,
+            last_ids,
+            grid_dim=(N_TILES_X, N_TILES_Y, C),
+            block_dim=(TILE, TILE, 1),
         )
