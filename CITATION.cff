@@ -1,0 +1,15 @@
+cff-version: 1.2.0
+message: >-
+  This repository is pre-alpha and has no published release. If you use a
+  future released version, cite that archived release and its version-specific
+  metadata. Until then, cite the repository revision you used.
+type: software
+title: "gsplat-mojo"
+abstract: >-
+  Pre-alpha, inference-first PyTorch bindings for experimental Gaussian
+  rendering kernels written in Mojo.
+authors:
+  - family-names: "Menon"
+    given-names: "Sandeep"
+repository-code: "https://github.com/sandeepnmenon/gsplat_mojo"
+license: "MIT"
