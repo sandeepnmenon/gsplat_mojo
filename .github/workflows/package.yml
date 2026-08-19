@@ -1,0 +1,108 @@
+name: Package and API checks
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build wheel and source distribution
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6
+        with:
+          version: "0.12.5"
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+
+      - name: Build distributions
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ci-artifacts
+          uv build 2>&1 | tee ci-artifacts/uv-build.log
+
+      - name: Upload package distributions
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: package-distributions
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: package-build-log
+          path: ci-artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+
+  api-contract:
+    name: Installed-wheel package contract
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6
+        with:
+          version: "0.12.5"
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+
+      - name: Download package distributions
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4
+        with:
+          name: package-distributions
+          path: dist
+
+      - name: Install built wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ci-artifacts
+          uv venv --python 3.13 .venv-package
+          WHEEL="$(python -c 'import glob; print(glob.glob("dist/*.whl")[0])')"
+          uv pip install \
+            --python .venv-package/bin/python \
+            --index https://whl.modular.com/nightly/simple/ \
+            --prerelease allow \
+            "${WHEEL}" \
+            "pytest>=8.3,<9" 2>&1 | tee ci-artifacts/wheel-install.log
+
+      - name: Run package API contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          .venv-package/bin/python -m pytest \
+            -m "not gpu" \
+            tests/test_api_contract.py \
+            -vv 2>&1 | tee ci-artifacts/api-contract.log
+
+      - name: Upload package test logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: package-api-contract-logs
+          path: ci-artifacts/
+          if-no-files-found: warn
+          retention-days: 7
