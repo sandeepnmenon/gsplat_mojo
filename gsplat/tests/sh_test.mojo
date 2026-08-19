@@ -39,7 +39,12 @@ def _shk(sh: List[Float32], g: Int, i: Int, ch: Int) -> Float32:
 
 
 def host_sh(
-    sh: List[Float32], g: Int, deg: Int, dx: Float32, dy: Float32, dz: Float32,
+    sh: List[Float32],
+    g: Int,
+    deg: Int,
+    dx: Float32,
+    dy: Float32,
+    dz: Float32,
     ch: Int,
 ) -> Float32:
     """Independent SH evaluation; constants come from their closed forms."""
@@ -56,7 +61,11 @@ def host_sh(
 
     var v = c0 * _shk(sh, g, 0, ch)
     if deg >= 1:
-        v += -c1 * dy * _shk(sh, g, 1, ch) + c1 * dz * _shk(sh, g, 2, ch) - c1 * dx * _shk(sh, g, 3, ch)
+        v += (
+            -c1 * dy * _shk(sh, g, 1, ch)
+            + c1 * dz * _shk(sh, g, 2, ch)
+            - c1 * dx * _shk(sh, g, 3, ch)
+        )
         if deg >= 2:
             var xx = dx * dx
             var yy = dy * dy
@@ -70,7 +79,12 @@ def host_sh(
                 v += -c30 * dy * (3.0 * xx - yy) * _shk(sh, g, 9, ch)
                 v += c31 * dx * dy * dz * _shk(sh, g, 10, ch)
                 v += -c32 * dy * (4.0 * zz - xx - yy) * _shk(sh, g, 11, ch)
-                v += c33 * dz * (2.0 * zz - 3.0 * xx - 3.0 * yy) * _shk(sh, g, 12, ch)
+                v += (
+                    c33
+                    * dz
+                    * (2.0 * zz - 3.0 * xx - 3.0 * yy)
+                    * _shk(sh, g, 12, ch)
+                )
                 v += -c32 * dx * (4.0 * zz - xx - yy) * _shk(sh, g, 13, ch)
                 v += c35 * dz * (xx - yy) * _shk(sh, g, 14, ch)
                 v += -c30 * dx * (xx - 3.0 * yy) * _shk(sh, g, 15, ch)
@@ -81,8 +95,14 @@ def host_sh(
 
 
 def compare(
-    got: List[Float32], sh_ref: List[Float32], means: List[Float32],
-    n: Int, deg: Int, ex: Float32, ey: Float32, ez: Float32,
+    got: List[Float32],
+    sh_ref: List[Float32],
+    means: List[Float32],
+    n: Int,
+    deg: Int,
+    ex: Float32,
+    ey: Float32,
+    ez: Float32,
 ) -> Float32:
     var worst: Float32 = 0.0
     for g in range(n):
@@ -162,8 +182,14 @@ def main() raises:
 
     # ---- 1. degree 0 must be exactly the constant-colour path ----
     ctx.enqueue_function[compute_colors_from_sh](
-        sh, means, viewmats, colors, Int32(n), Int32(0),
-        grid_dim=(blocks, C), block_dim=TPB,
+        sh,
+        means,
+        viewmats,
+        colors,
+        Int32(n),
+        Int32(0),
+        grid_dim=(blocks, C),
+        block_dim=TPB,
     )
     ctx.synchronize()
     var got0 = List[Float32]()
@@ -186,8 +212,14 @@ def main() raises:
 
     # ---- 2. degree 3 against the closed-form host basis ----
     ctx.enqueue_function[compute_colors_from_sh](
-        sh, means, viewmats, colors, Int32(n), Int32(3),
-        grid_dim=(blocks, C), block_dim=TPB,
+        sh,
+        means,
+        viewmats,
+        colors,
+        Int32(n),
+        Int32(3),
+        grid_dim=(blocks, C),
+        block_dim=TPB,
     )
     ctx.synchronize()
     var got3 = List[Float32]()
@@ -207,8 +239,14 @@ def main() raises:
         view_h[c * 16 + 11] = -ez2
     ctx.enqueue_copy(dst_buf=view_buf, src_buf=view_h)
     ctx.enqueue_function[compute_colors_from_sh](
-        sh, means, viewmats, colors, Int32(n), Int32(3),
-        grid_dim=(blocks, C), block_dim=TPB,
+        sh,
+        means,
+        viewmats,
+        colors,
+        Int32(n),
+        Int32(3),
+        grid_dim=(blocks, C),
+        block_dim=TPB,
     )
     ctx.synchronize()
     var got3b = List[Float32]()
@@ -222,10 +260,17 @@ def main() raises:
         if d > moved:
             moved = d
     print("degree 3 from a second view  : max err", w3b)
-    print("colour change between views  :", moved, "(0 would mean view-independent)")
+    print(
+        "colour change between views  :",
+        moved,
+        "(0 would mean view-independent)",
+    )
 
     if (
-        w0 <= TOL and worst_const <= TOL and w3 <= TOL and w3b <= TOL
+        w0 <= TOL
+        and worst_const <= TOL
+        and w3 <= TOL
+        and w3b <= TOL
         and moved > 0.01
     ):
         print(

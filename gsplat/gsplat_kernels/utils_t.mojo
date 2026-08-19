@@ -57,9 +57,7 @@ struct Mat3(Copyable, ImplicitlyCopyable, Movable, Writable):
 
     def __mul__(self, v: Vec3) -> Vec3:
         """Matrix-vector product."""
-        return Vec3(
-            self.row(0).dot(v), self.row(1).dot(v), self.row(2).dot(v)
-        )
+        return Vec3(self.row(0).dot(v), self.row(1).dot(v), self.row(2).dot(v))
 
     def write_to(self, mut w: Some[Writer]):
         comptime for r in range(3):

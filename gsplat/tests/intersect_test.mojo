@@ -254,22 +254,43 @@ def main() raises:
     var gblocks = ceildiv(n_gauss, TPB)
 
     ctx.enqueue_function[project_and_count](
-        means, scales, quats, opacities, viewmats, ks,
-        counts, bboxes, depths,
-        Int32(n_gauss), Int32(N_TILES_X), Int32(N_TILES_Y), Int32(TILE),
-        grid_dim=(gblocks, C), block_dim=TPB,
+        means,
+        scales,
+        quats,
+        opacities,
+        viewmats,
+        ks,
+        counts,
+        bboxes,
+        depths,
+        Int32(n_gauss),
+        Int32(N_TILES_X),
+        Int32(N_TILES_Y),
+        Int32(TILE),
+        grid_dim=(gblocks, C),
+        block_dim=TPB,
     )
     ctx.enqueue_function[scan_block](
-        counts_flat, offsets_flat, block_sums, Int32(C * N_MAX),
-        grid_dim=SCAN_NUM_BLOCKS, block_dim=SCAN_BLOCK,
+        counts_flat,
+        offsets_flat,
+        block_sums,
+        Int32(C * N_MAX),
+        grid_dim=SCAN_NUM_BLOCKS,
+        block_dim=SCAN_BLOCK,
     )
     ctx.enqueue_function[scan_block_sums](
-        block_sums, total, Int32(SCAN_NUM_BLOCKS),
-        grid_dim=1, block_dim=SCAN_WIDTH,
+        block_sums,
+        total,
+        Int32(SCAN_NUM_BLOCKS),
+        grid_dim=1,
+        block_dim=SCAN_WIDTH,
     )
     ctx.enqueue_function[add_block_offsets](
-        offsets_flat, block_sums, Int32(C * N_MAX),
-        grid_dim=SCAN_NUM_BLOCKS, block_dim=SCAN_BLOCK,
+        offsets_flat,
+        block_sums,
+        Int32(C * N_MAX),
+        grid_dim=SCAN_NUM_BLOCKS,
+        block_dim=SCAN_BLOCK,
     )
     ctx.enqueue_copy(dst_buf=total_h, src_buf=total_buf)
     ctx.synchronize()
@@ -315,18 +336,37 @@ def main() raises:
     var scratch = TileTensor(scratch_buf, layout_one)
 
     ctx.enqueue_function[emit_isects](
-        bboxes, depths, offsets, counts, keys, vals,
-        Int32(n_gauss), Int32(N_TILES_X), Int32(N_TILES),
-        grid_dim=(gblocks, C), block_dim=TPB,
+        bboxes,
+        depths,
+        offsets,
+        counts,
+        keys,
+        vals,
+        Int32(n_gauss),
+        Int32(N_TILES_X),
+        Int32(N_TILES),
+        grid_dim=(gblocks, C),
+        block_dim=TPB,
     )
     # snapshot the unsorted pairs for the bitonic cross-check
     ctx.enqueue_copy(dst_buf=keys_bit_buf, src_buf=keys_buf)
     ctx.enqueue_copy(dst_buf=vals_bit_buf, src_buf=vals_buf)
 
     radix_sort_pairs(
-        ctx, keys, vals, keys_alt, vals_alt,
-        hist, hist_off, block_sums, scratch,
-        keys_buf, vals_buf, keys_alt_buf, vals_alt_buf, n_isects,
+        ctx,
+        keys,
+        vals,
+        keys_alt,
+        vals_alt,
+        hist,
+        hist_off,
+        block_sums,
+        scratch,
+        keys_buf,
+        vals_buf,
+        keys_alt_buf,
+        vals_alt_buf,
+        n_isects,
     )
     print("radix:", RADIX_PASSES, "passes over", n_rblocks, "blocks")
 
@@ -337,8 +377,13 @@ def main() raises:
         var j = k // 2
         while j > 0:
             ctx.enqueue_function[bitonic_step](
-                keys_bit, vals_bit, Int32(n_pow2), Int32(k), Int32(j),
-                grid_dim=sort_blocks, block_dim=TPB,
+                keys_bit,
+                vals_bit,
+                Int32(n_pow2),
+                Int32(k),
+                Int32(j),
+                grid_dim=sort_blocks,
+                block_dim=TPB,
             )
             j //= 2
         k *= 2
@@ -361,8 +406,11 @@ def main() raises:
 
     tileoff_buf.enqueue_fill(Int32(n_isects))
     ctx.enqueue_function[write_tile_offsets](
-        keys, tile_offsets, Int32(n_isects),
-        grid_dim=ceildiv(n_isects, TPB), block_dim=TPB,
+        keys,
+        tile_offsets,
+        Int32(n_isects),
+        grid_dim=ceildiv(n_isects, TPB),
+        block_dim=TPB,
     )
     ctx.synchronize()
 
@@ -377,8 +425,11 @@ def main() raises:
     var bz = List[Float32]()
     for g in range(n_gauss):
         var r = ref_bbox(g, n_gauss)
-        bx0.append(r[0]); by0.append(r[1])
-        bx1.append(r[2]); by1.append(r[3]); bz.append(r[4])
+        bx0.append(r[0])
+        by0.append(r[1])
+        bx1.append(r[2])
+        by1.append(r[3])
+        bz.append(r[4])
     var ref_total = 0
     var culled = 0
     for g in range(n_gauss):
@@ -390,7 +441,13 @@ def main() raises:
                 ref_counts[ty * N_TILES_X + tx] += 1
                 ref_total += 1
 
-    print("host reference:", ref_total, "intersections |", culled, "gaussians culled")
+    print(
+        "host reference:",
+        ref_total,
+        "intersections |",
+        culled,
+        "gaussians culled",
+    )
 
     var bad_offsets = 0
     var bad_sets = 0
@@ -412,7 +469,9 @@ def main() raises:
                 # per-tile membership and ordering
                 for t in range(C * N_TILES):
                     var start = Int(th[t])
-                    var end = n_isects if t == C * N_TILES - 1 else Int(th[t + 1])
+                    var end = n_isects if t == C * N_TILES - 1 else Int(
+                        th[t + 1]
+                    )
                     if end - start != ref_counts[t]:
                         bad_sets += 1
                         continue
@@ -441,9 +500,12 @@ def main() raises:
 
     print("tiles with gaussians:", nonempty, "of", C * N_TILES)
     print(
-        "mismatches — offsets:", bad_offsets,
-        "| tile membership:", bad_sets,
-        "| ordering:", bad_order,
+        "mismatches — offsets:",
+        bad_offsets,
+        "| tile membership:",
+        bad_sets,
+        "| ordering:",
+        bad_order,
     )
     if (
         n_isects == ref_total
@@ -453,6 +515,9 @@ def main() raises:
         and nonempty > 0
         and sort_diff == 0
     ):
-        print("PASS: binning matches the host reference, and the radix sort agrees with bitonic")
+        print(
+            "PASS: binning matches the host reference, and the radix sort"
+            " agrees with bitonic"
+        )
     else:
         raise Error("FAIL: intersection stage disagrees with the reference")

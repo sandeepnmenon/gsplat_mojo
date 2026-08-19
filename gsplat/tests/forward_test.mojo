@@ -97,6 +97,7 @@ comptime BG = SIMD[DTYPE, 4](0.1, 0.15, 0.2, 0.0)
 comptime MASKED_TILE = 0  # one tile forced invisible, to cover the mask path
 comptime TOL: Float32 = 2e-4  # GPU vs host exp() disagree in the last bits
 
+
 def main() raises:
     comptime assert has_accelerator(), "gsplat forward pass requires a GPU"
     comptime assert (
@@ -210,8 +211,17 @@ def main() raises:
     var gblocks = ceildiv(n_gauss, TPB)
 
     print(
-        "render", IMG_W, "x", IMG_H, "|", n_gauss, "gaussians |",
-        N_TILES_X, "x", N_TILES_Y, "tiles",
+        "render",
+        IMG_W,
+        "x",
+        IMG_H,
+        "|",
+        n_gauss,
+        "gaussians |",
+        N_TILES_X,
+        "x",
+        N_TILES_Y,
+        "tiles",
     )
 
     # =====================================================================
@@ -258,17 +268,39 @@ def main() raises:
     ids_buf.enqueue_fill(-1)
 
     ctx.enqueue_function[rasterize_to_pixels_from_world_3dgs_fwd](
-        Int32(C), Int32(n_gauss), Int32(n_isects_full), Int32(0),
-        means, quats, scales, colors, opacities, backgrounds, masks,
-        Int32(1), Int32(1),
-        Int32(IMG_W), Int32(IMG_H), Int32(TILE),
-        Int32(N_TILES_X), Int32(N_TILES_Y),
-        viewmats0, viewmats1, ks,
-        Int32(0), Int32(0),
-        radial, tangential, thin_prims,
-        tile_offsets, flatten_ids,
-        render_colors, render_alphas, last_ids,
-        grid_dim=(N_TILES_X, N_TILES_Y, C), block_dim=(TILE, TILE, 1),
+        Int32(C),
+        Int32(n_gauss),
+        Int32(n_isects_full),
+        Int32(0),
+        means,
+        quats,
+        scales,
+        colors,
+        opacities,
+        backgrounds,
+        masks,
+        Int32(1),
+        Int32(1),
+        Int32(IMG_W),
+        Int32(IMG_H),
+        Int32(TILE),
+        Int32(N_TILES_X),
+        Int32(N_TILES_Y),
+        viewmats0,
+        viewmats1,
+        ks,
+        Int32(0),
+        Int32(0),
+        radial,
+        tangential,
+        thin_prims,
+        tile_offsets,
+        flatten_ids,
+        render_colors,
+        render_alphas,
+        last_ids,
+        grid_dim=(N_TILES_X, N_TILES_Y, C),
+        block_dim=(TILE, TILE, 1),
     )
     ctx.synchronize()
 
@@ -284,7 +316,9 @@ def main() raises:
                     for x in range(IMG_W):
                         var exp_a: Float32
                         var exp_c = SIMD[DTYPE, 4](0.0)
-                        if ((y // TILE) * N_TILES_X + (x // TILE)) == MASKED_TILE:
+                        if (
+                            (y // TILE) * N_TILES_X + (x // TILE)
+                        ) == MASKED_TILE:
                             exp_a = 0.0
                             comptime for k in range(CDIM):
                                 exp_c[k] = BG[k]
@@ -331,9 +365,14 @@ def main() raises:
                         if miss:
                             bad1 += 1
     print(
-        "phase 1  closed form   | lit", lit1,
-        "| max err color", worst_c1, "alpha", worst_a1,
-        "| bad", bad1,
+        "phase 1  closed form   | lit",
+        lit1,
+        "| max err color",
+        worst_c1,
+        "alpha",
+        worst_a1,
+        "| bad",
+        bad1,
     )
     var ok1 = bad1 == 0 and lit1 > 0
 
@@ -396,25 +435,59 @@ def main() raises:
     alphas_buf.enqueue_fill(-1.0)
 
     ctx.enqueue_function[rasterize_to_pixels_from_world_3dgs_fwd](
-        Int32(C), Int32(n_gauss), Int32(n_isects_full), Int32(0),
-        means, quats, scales, colors, opacities, backgrounds, masks,
-        Int32(1), Int32(1),
-        Int32(IMG_W), Int32(IMG_H), Int32(TILE),
-        Int32(N_TILES_X), Int32(N_TILES_Y),
-        viewmats0, viewmats1, ks,
-        Int32(0), Int32(0),
-        radial, tangential, thin_prims,
-        tile_offsets, flatten_ids,
-        render_colors, render_alphas, last_ids,
-        grid_dim=(N_TILES_X, N_TILES_Y, C), block_dim=(TILE, TILE, 1),
+        Int32(C),
+        Int32(n_gauss),
+        Int32(n_isects_full),
+        Int32(0),
+        means,
+        quats,
+        scales,
+        colors,
+        opacities,
+        backgrounds,
+        masks,
+        Int32(1),
+        Int32(1),
+        Int32(IMG_W),
+        Int32(IMG_H),
+        Int32(TILE),
+        Int32(N_TILES_X),
+        Int32(N_TILES_Y),
+        viewmats0,
+        viewmats1,
+        ks,
+        Int32(0),
+        Int32(0),
+        radial,
+        tangential,
+        thin_prims,
+        tile_offsets,
+        flatten_ids,
+        render_colors,
+        render_alphas,
+        last_ids,
+        grid_dim=(N_TILES_X, N_TILES_Y, C),
+        block_dim=(TILE, TILE, 1),
     )
     ctx.enqueue_copy(dst_buf=keep_c, src_buf=renders_buf)
     ctx.enqueue_copy(dst_buf=keep_a, src_buf=alphas_buf)
     ctx.synchronize()
 
-    var cam_x = -(view_rot(0, 0) * view_trans(0) + view_rot(1, 0) * view_trans(1) + view_rot(2, 0) * view_trans(2))
-    var cam_y = -(view_rot(0, 1) * view_trans(0) + view_rot(1, 1) * view_trans(1) + view_rot(2, 1) * view_trans(2))
-    var cam_zc = -(view_rot(0, 2) * view_trans(0) + view_rot(1, 2) * view_trans(1) + view_rot(2, 2) * view_trans(2))
+    var cam_x = -(
+        view_rot(0, 0) * view_trans(0)
+        + view_rot(1, 0) * view_trans(1)
+        + view_rot(2, 0) * view_trans(2)
+    )
+    var cam_y = -(
+        view_rot(0, 1) * view_trans(0)
+        + view_rot(1, 1) * view_trans(1)
+        + view_rot(2, 1) * view_trans(2)
+    )
+    var cam_zc = -(
+        view_rot(0, 2) * view_trans(0)
+        + view_rot(1, 2) * view_trans(1)
+        + view_rot(2, 2) * view_trans(2)
+    )
 
     var worst_c2: Float32 = 0.0
     var worst_a2: Float32 = 0.0
@@ -425,26 +498,43 @@ def main() raises:
             for x in range(IMG_W):
                 var u = (Float32(x) + 0.5 - CX) / FOCAL
                 var v = (Float32(y) + 0.5 - CY) / FOCAL
-                var dwx = view_rot(0, 0) * u + view_rot(1, 0) * v + view_rot(2, 0)
-                var dwy = view_rot(0, 1) * u + view_rot(1, 1) * v + view_rot(2, 1)
-                var dwz = view_rot(0, 2) * u + view_rot(1, 2) * v + view_rot(2, 2)
+                var dwx = (
+                    view_rot(0, 0) * u + view_rot(1, 0) * v + view_rot(2, 0)
+                )
+                var dwy = (
+                    view_rot(0, 1) * u + view_rot(1, 1) * v + view_rot(2, 1)
+                )
+                var dwz = (
+                    view_rot(0, 2) * u + view_rot(1, 2) * v + view_rot(2, 2)
+                )
                 var tr: Float32 = 1.0
                 var acc = SIMD[DTYPE, 4](0.0)
                 for oi in range(n_gauss):
                     var g = order[oi]
                     var qn = spread_quat_norm(g)
                     var res = _ref_rho2(
-                        spread_mean(g, 0, n_gauss), spread_mean(g, 1, n_gauss), spread_mean(g, 2, n_gauss),
-                        spread_quat(g, 0) / qn, spread_quat(g, 1) / qn,
-                        spread_quat(g, 2) / qn, spread_quat(g, 3) / qn,
-                        spread_scale(g, 0), spread_scale(g, 1), spread_scale(g, 2),
-                        cam_x, cam_y, cam_zc,
-                        dwx, dwy, dwz,
+                        spread_mean(g, 0, n_gauss),
+                        spread_mean(g, 1, n_gauss),
+                        spread_mean(g, 2, n_gauss),
+                        spread_quat(g, 0) / qn,
+                        spread_quat(g, 1) / qn,
+                        spread_quat(g, 2) / qn,
+                        spread_quat(g, 3) / qn,
+                        spread_scale(g, 0),
+                        spread_scale(g, 1),
+                        spread_scale(g, 2),
+                        cam_x,
+                        cam_y,
+                        cam_zc,
+                        dwx,
+                        dwy,
+                        dwz,
                     )
                     if res[1] <= 0.0:
                         continue
                     var a = min(
-                        Float32(MAX_ALPHA), spread_opacity(g) * exp(-0.5 * res[0])
+                        Float32(MAX_ALPHA),
+                        spread_opacity(g) * exp(-0.5 * res[0]),
                     )
                     if a < MIN_ALPHA:
                         continue
@@ -474,9 +564,14 @@ def main() raises:
                 if miss:
                     bad2 += 1
     print(
-        "phase 2  scalar ref    | lit", lit2,
-        "| max err color", worst_c2, "alpha", worst_a2,
-        "| bad", bad2,
+        "phase 2  scalar ref    | lit",
+        lit2,
+        "| max err color",
+        worst_c2,
+        "alpha",
+        worst_a2,
+        "| bad",
+        bad2,
     )
     var ok2 = bad2 == 0 and lit2 > 0
 
@@ -486,22 +581,43 @@ def main() raises:
     # =====================================================================
     counts_buf.enqueue_fill(0)  # the scan covers the whole capacity
     ctx.enqueue_function[project_and_count](
-        means, scales, quats, opacities, viewmats0, ks,
-        counts, bboxes, depths,
-        Int32(n_gauss), Int32(N_TILES_X), Int32(N_TILES_Y), Int32(TILE),
-        grid_dim=(gblocks, C), block_dim=TPB,
+        means,
+        scales,
+        quats,
+        opacities,
+        viewmats0,
+        ks,
+        counts,
+        bboxes,
+        depths,
+        Int32(n_gauss),
+        Int32(N_TILES_X),
+        Int32(N_TILES_Y),
+        Int32(TILE),
+        grid_dim=(gblocks, C),
+        block_dim=TPB,
     )
     ctx.enqueue_function[scan_block](
-        counts_flat, offsets_flat, block_sums, Int32(C * N_MAX),
-        grid_dim=SCAN_NUM_BLOCKS, block_dim=SCAN_BLOCK,
+        counts_flat,
+        offsets_flat,
+        block_sums,
+        Int32(C * N_MAX),
+        grid_dim=SCAN_NUM_BLOCKS,
+        block_dim=SCAN_BLOCK,
     )
     ctx.enqueue_function[scan_block_sums](
-        block_sums, total, Int32(SCAN_NUM_BLOCKS),
-        grid_dim=1, block_dim=SCAN_WIDTH,
+        block_sums,
+        total,
+        Int32(SCAN_NUM_BLOCKS),
+        grid_dim=1,
+        block_dim=SCAN_WIDTH,
     )
     ctx.enqueue_function[add_block_offsets](
-        offsets_flat, block_sums, Int32(C * N_MAX),
-        grid_dim=SCAN_NUM_BLOCKS, block_dim=SCAN_BLOCK,
+        offsets_flat,
+        block_sums,
+        Int32(C * N_MAX),
+        grid_dim=SCAN_NUM_BLOCKS,
+        block_dim=SCAN_BLOCK,
     )
     ctx.enqueue_copy(dst_buf=total_h, src_buf=total_buf)
     ctx.synchronize()
@@ -528,35 +644,79 @@ def main() raises:
     var scratch = TileTensor(scratch_buf, layout_one)
 
     ctx.enqueue_function[emit_isects](
-        bboxes, depths, offsets, counts, keys, sorted_ids,
-        Int32(n_gauss), Int32(N_TILES_X), Int32(N_TILES),
-        grid_dim=(gblocks, C), block_dim=TPB,
+        bboxes,
+        depths,
+        offsets,
+        counts,
+        keys,
+        sorted_ids,
+        Int32(n_gauss),
+        Int32(N_TILES_X),
+        Int32(N_TILES),
+        grid_dim=(gblocks, C),
+        block_dim=TPB,
     )
     radix_sort_pairs(
-        ctx, keys, sorted_ids, keys_alt, vals_alt,
-        hist, hist_off, block_sums, scratch,
-        keys_buf, sorted_buf, keys_alt_buf, vals_alt_buf, n_isects,
+        ctx,
+        keys,
+        sorted_ids,
+        keys_alt,
+        vals_alt,
+        hist,
+        hist_off,
+        block_sums,
+        scratch,
+        keys_buf,
+        sorted_buf,
+        keys_alt_buf,
+        vals_alt_buf,
+        n_isects,
     )
     tileoff_buf.enqueue_fill(Int32(n_isects))
     ctx.enqueue_function[write_tile_offsets](
-        keys, tile_offsets_flat, Int32(n_isects),
-        grid_dim=ceildiv(n_isects, TPB), block_dim=TPB,
+        keys,
+        tile_offsets_flat,
+        Int32(n_isects),
+        grid_dim=ceildiv(n_isects, TPB),
+        block_dim=TPB,
     )
     renders_buf.enqueue_fill(-1.0)
     alphas_buf.enqueue_fill(-1.0)
 
     ctx.enqueue_function[rasterize_to_pixels_from_world_3dgs_fwd](
-        Int32(C), Int32(n_gauss), Int32(n_isects), Int32(0),
-        means, quats, scales, colors, opacities, backgrounds, masks,
-        Int32(1), Int32(1),
-        Int32(IMG_W), Int32(IMG_H), Int32(TILE),
-        Int32(N_TILES_X), Int32(N_TILES_Y),
-        viewmats0, viewmats1, ks,
-        Int32(0), Int32(0),
-        radial, tangential, thin_prims,
-        tile_offsets, sorted_ids,
-        render_colors, render_alphas, last_ids,
-        grid_dim=(N_TILES_X, N_TILES_Y, C), block_dim=(TILE, TILE, 1),
+        Int32(C),
+        Int32(n_gauss),
+        Int32(n_isects),
+        Int32(0),
+        means,
+        quats,
+        scales,
+        colors,
+        opacities,
+        backgrounds,
+        masks,
+        Int32(1),
+        Int32(1),
+        Int32(IMG_W),
+        Int32(IMG_H),
+        Int32(TILE),
+        Int32(N_TILES_X),
+        Int32(N_TILES_Y),
+        viewmats0,
+        viewmats1,
+        ks,
+        Int32(0),
+        Int32(0),
+        radial,
+        tangential,
+        thin_prims,
+        tile_offsets,
+        sorted_ids,
+        render_colors,
+        render_alphas,
+        last_ids,
+        grid_dim=(N_TILES_X, N_TILES_Y, C),
+        block_dim=(TILE, TILE, 1),
     )
     ctx.synchronize()
 
@@ -583,13 +743,21 @@ def main() raises:
 
     var work_full = n_isects_full
     print(
-        "phase 3  real binning  |", n_isects, "intersections vs", work_full,
-        "brute force  (", Int(100.0 * Float32(n_isects) / Float32(work_full)),
+        "phase 3  real binning  |",
+        n_isects,
+        "intersections vs",
+        work_full,
+        "brute force  (",
+        Int(100.0 * Float32(n_isects) / Float32(work_full)),
         "% )",
     )
     print(
-        "         vs phase 2 image | max diff color", worst_c3,
-        "alpha", worst_a3, "| pixels differing", differing,
+        "         vs phase 2 image | max diff color",
+        worst_c3,
+        "alpha",
+        worst_a3,
+        "| pixels differing",
+        differing,
     )
     # A culled gaussian is one the rasterizer would have rejected at MIN_ALPHA
     # anyway, so its weight was under 1/255; anything larger means the bound
@@ -604,7 +772,10 @@ def main() raises:
         )
     else:
         raise Error(
-            String("FAIL: p1 bad=") + String(bad1)
-            + " p2 bad=" + String(bad2)
-            + " p3 maxdiff=" + String(worst_c3)
+            String("FAIL: p1 bad=")
+            + String(bad1)
+            + " p2 bad="
+            + String(bad2)
+            + " p3 maxdiff="
+            + String(worst_c3)
         )
