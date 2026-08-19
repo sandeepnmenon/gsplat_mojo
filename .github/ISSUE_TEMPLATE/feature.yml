@@ -1,0 +1,44 @@
+name: Feature request
+description: Propose a capability or support-tier change
+title: "[Feature]: "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: dropdown
+    id: classification
+    attributes:
+      label: Current classification
+      description: Use SUPPORT.md and ROADMAP.md.
+      options:
+        - Planned
+        - Best effort — Tier 2 promotion request
+        - New proposal
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What user problem would this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Include API shape, correctness criteria, and compatibility expectations.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Validation or promotion evidence
+      description: For Tier 1 promotion, describe repeatable correctness checks and CI coverage.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues and the roadmap.
+          required: true
+        - label: I understand planned features are not commitments or available capabilities.
+          required: true

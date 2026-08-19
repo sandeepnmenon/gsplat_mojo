@@ -1,0 +1,56 @@
+name: Bug report
+description: Report a reproducible failure in a currently available feature
+title: "[Bug]: "
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report security vulnerabilities here. Read SECURITY.md instead.
+        Check SUPPORT.md and label the affected capability Tier 1 or Tier 2.
+  - type: dropdown
+    id: tier
+    attributes:
+      label: Support tier
+      options:
+        - Tested — Tier 1
+        - Best effort — Tier 2
+        - Unsure
+    validations:
+      required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: Failure
+      description: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction
+      description: Include commands and the smallest runnable input or code.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Revision, OS, Python, PyTorch, MAX/Mojo, GPU, and driver versions.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Complete output
+      render: shell
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues.
+          required: true
+        - label: This report contains no confidential or security-sensitive information.
+          required: true
