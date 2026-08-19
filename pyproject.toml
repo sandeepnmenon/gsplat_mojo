@@ -1,0 +1,72 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "gsplat-mojo"
+version = "0.1.0a0"
+description = "Inference-first PyTorch bindings for Mojo Gaussian splatting kernels"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = { file = "LICENSE" }
+authors = [{ name = "Sandeep Menon", email = "s.menon@kodiak.ai" }]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Environment :: GPU :: NVIDIA CUDA",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Typing :: Typed",
+]
+dependencies = [
+  "max==26.6.0.dev2026081813",
+  "torch>=2.8,<2.9",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8.3,<9",
+]
+
+[project.urls]
+Repository = "https://github.com/sandeepnmenon/gsplat_mojo"
+
+[tool.hatch.build]
+include = [
+  "src/gsplat_mojo/**/*.py",
+  "src/gsplat_mojo/py.typed",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/gsplat_mojo"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"gsplat/gsplat_kernels" = "gsplat_mojo/kernels/gsplat_kernels"
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "docs",
+  "gsplat/gsplat_kernels",
+  "src/gsplat_mojo",
+  "tests",
+  "LICENSE",
+  "README.md",
+  "pyproject.toml",
+]
+
+[[tool.uv.index]]
+name = "modular-nightly"
+url = "https://whl.modular.com/nightly/simple/"
+
+[tool.uv.sources]
+max = { index = "modular-nightly" }
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+markers = [
+  "gpu: requires a CUDA device and the MAX PyTorch bridge",
+]

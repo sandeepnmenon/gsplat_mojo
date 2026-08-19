@@ -13,9 +13,10 @@ cosmetic:
   | `ctx.get_device_context()`      | `ctx` directly                       |
 
 The op owns all of its scratch: it projects, bins, depth-sorts and rasterizes,
-then writes RGB into `img_out`. Because the intersection count is only known
-after the prefix sum, there is one device-to-host sync inside the op to size
-the sort — the reference CUDA implementation does the same.
+then writes RGB and alpha into caller-owned outputs. Because the intersection
+count is only known after the prefix sum, there is one device-to-host sync
+inside the op to size the sort — the reference CUDA implementation does the
+same.
 """
 
 from std.math import ceildiv
@@ -31,6 +32,7 @@ from gsplat_kernels.config import (
     IMG_H,
     IMG_W,
     KDTYPE,
+    MAX_ISECTS,
     N_MAX,
     N_TILES,
     N_TILES_X,
@@ -81,7 +83,12 @@ struct Render:
     def execute[
         target: StaticString
     ](
-        img_out: OutputTensor[dtype=DType.float32, rank=3, static_spec=_],
+        render_colors_out: OutputTensor[
+            dtype=DType.float32, rank=4, static_spec=_
+        ],
+        render_alphas_out: OutputTensor[
+            dtype=DType.float32, rank=4, static_spec=_
+        ],
         means: InputTensor[dtype=DType.float32, rank=2, static_spec=_],
         colors: InputTensor[dtype=DType.float32, rank=2, static_spec=_],
         opacities: InputTensor[dtype=DType.float32, rank=1, static_spec=_],
@@ -98,14 +105,38 @@ struct Render:
         if n_gauss <= 0 or n_gauss > N_MAX:
             raise Error("render: gaussian count outside the configured N_MAX")
         if (
-            Int(img_out.dim_size(0)) != IMG_H
-            or Int(img_out.dim_size(1)) != IMG_W
+            Int(means.dim_size(1)) != 3
+            or Int(colors.dim_size(0)) != n_gauss
+            or Int(colors.dim_size(1)) != CDIM
+            or Int(opacities.dim_size(0)) != n_gauss
+            or Int(scales.dim_size(0)) != n_gauss
+            or Int(scales.dim_size(1)) != 3
+            or Int(quats.dim_size(0)) != n_gauss
+            or Int(quats.dim_size(1)) != 4
         ):
-            raise Error("render: output size does not match the build config")
-        if Int(img_out.dim_size(2)) != CDIM:
-            raise Error("render: output channel count does not match CDIM")
-        if Int(viewmats.dim_size(0)) != C:
-            raise Error("render: camera count does not match the build config")
+            raise Error(
+                "render: gaussian input shapes do not match the contract"
+            )
+        if (
+            Int(render_colors_out.dim_size(0)) != C
+            or Int(render_colors_out.dim_size(1)) != IMG_H
+            or Int(render_colors_out.dim_size(2)) != IMG_W
+            or Int(render_colors_out.dim_size(3)) != CDIM
+            or Int(render_alphas_out.dim_size(0)) != C
+            or Int(render_alphas_out.dim_size(1)) != IMG_H
+            or Int(render_alphas_out.dim_size(2)) != IMG_W
+            or Int(render_alphas_out.dim_size(3)) != 1
+        ):
+            raise Error("render: output shapes do not match the build config")
+        if (
+            Int(viewmats.dim_size(0)) != C
+            or Int(viewmats.dim_size(1)) != 4
+            or Int(viewmats.dim_size(2)) != 4
+            or Int(ks.dim_size(0)) != C
+            or Int(ks.dim_size(1)) != 3
+            or Int(ks.dim_size(2)) != 3
+        ):
+            raise Error("render: camera input shapes do not match the contract")
 
         # Views over the caller's buffers. The layouts are capacity-shaped;
         # every index below stays inside the live count, and with C == 1 the
@@ -117,7 +148,12 @@ struct Render:
         var opac_t = TileTensor(opacities.unsafe_ptr(), layout_cn)
         var view_t = TileTensor(viewmats.unsafe_ptr(), layout_viewmats)
         var ks_t = TileTensor(ks.unsafe_ptr(), layout_intrinsics)
-        var out_t = TileTensor(img_out.unsafe_ptr(), layout_render_colors)
+        var render_colors = TileTensor(
+            render_colors_out.unsafe_ptr(), layout_render_colors
+        )
+        var render_alphas = TileTensor(
+            render_alphas_out.unsafe_ptr(), layout_render_alphas
+        )
 
         # Scratch the op owns.
         var bg_buf = ctx.enqueue_create_buffer[DTYPE](C * CDIM)
@@ -133,7 +169,6 @@ struct Render:
         var total_buf = ctx.enqueue_create_buffer[IDTYPE](1)
         var blocksum_buf = ctx.enqueue_create_buffer[IDTYPE](SCAN_NUM_BLOCKS)
         var tileoff_buf = ctx.enqueue_create_buffer[IDTYPE](C * N_TILES)
-        var alphas_buf = ctx.enqueue_create_buffer[DTYPE](C * IMG_H * IMG_W)
         var ids_buf = ctx.enqueue_create_buffer[IDTYPE](C * IMG_H * IMG_W)
         var total_h = ctx.enqueue_create_host_buffer[IDTYPE](1)
 
@@ -144,7 +179,6 @@ struct Render:
         tang_buf.enqueue_fill(0.0)
         thin_buf.enqueue_fill(0.0)
         counts_buf.enqueue_fill(0)
-        alphas_buf.enqueue_fill(0.0)
         ids_buf.enqueue_fill(-1)
 
         var backgrounds = TileTensor(bg_buf, layout_cdim)
@@ -163,7 +197,6 @@ struct Render:
         var total = TileTensor(total_buf, layout_one)
         var tile_offsets = TileTensor(tileoff_buf, layout_tiles)
         var tile_offsets_flat = TileTensor(tileoff_buf, layout_tiles_flat)
-        var render_alphas = TileTensor(alphas_buf, layout_render_alphas)
         var last_ids = TileTensor(ids_buf, layout_last_ids)
 
         comptime TPB = 256
@@ -212,6 +245,10 @@ struct Render:
         ctx.synchronize()  # the sort has to be sized before it can be issued
 
         var n_isects = Int(total_h[0])
+        if n_isects > MAX_ISECTS:
+            raise Error(
+                "render: intersection count exceeds configured MAX_ISECTS"
+            )
         # With nothing on screen every tile range is empty and the rasterizer
         # writes pure background, so the only special-casing needed is to keep
         # the allocations non-zero and skip the sort.
@@ -304,7 +341,7 @@ struct Render:
             thin_prims,
             tile_offsets,
             vals,
-            out_t,
+            render_colors,
             render_alphas,
             last_ids,
             grid_dim=(N_TILES_X, N_TILES_Y, C),
