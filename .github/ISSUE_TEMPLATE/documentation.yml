@@ -1,0 +1,42 @@
+name: Documentation issue
+description: Report inaccurate, unclear, or broken public documentation
+title: "[Docs]: "
+labels: ["documentation", "needs-triage"]
+body:
+  - type: input
+    id: location
+    attributes:
+      label: Location
+      description: File, section, or URL.
+    validations:
+      required: true
+  - type: textarea
+    id: issue
+    attributes:
+      label: Problem
+      description: Quote the inaccurate or unclear statement when possible.
+    validations:
+      required: true
+  - type: dropdown
+    id: claim
+    attributes:
+      label: Claim classification
+      options:
+        - Tested — Tier 1
+        - Best effort — Tier 2
+        - Planned
+        - Policy/non-capability text
+        - Unsure
+    validations:
+      required: true
+  - type: textarea
+    id: correction
+    attributes:
+      label: Suggested correction or evidence
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I searched existing issues.
+          required: true
