@@ -1,0 +1,217 @@
+name: Tier 1 NVIDIA checks
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tier1-nvidia-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PIXI_VERSION: "0.50.2"
+
+jobs:
+  mojo-format-build:
+    name: Mojo format and kernel package
+    runs-on: [self-hosted, linux, x64, nvidia, tier-1]
+    timeout-minutes: 25
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install pixi and restore cache
+        uses: prefix-dev/setup-pixi@fef5c9568ca6c4ff7707bf840ab0692ba3f08293  # v0.9.0
+        with:
+          pixi-version: ${{ env.PIXI_VERSION }}
+          manifest-path: gsplat/mojoproject.toml
+          cache: true
+          locked: true
+
+      - name: Check Mojo formatting
+        working-directory: gsplat
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ../ci-artifacts
+          pixi run mojo format gsplat_kernels tests \
+            2>&1 | tee ../ci-artifacts/mojo-format.log
+          git diff --exit-code -- '*.mojo' \
+            2>&1 | tee -a ../ci-artifacts/mojo-format.log
+
+      - name: Precompile kernel package
+        working-directory: gsplat
+        shell: bash
+        run: |
+          set -euo pipefail
+          pixi run package 2>&1 | tee ../ci-artifacts/mojo-package.log
+
+      - name: Upload kernel package and logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: tier1-mojo-package
+          path: |
+            gsplat/gsplat_kernels.mojoc
+            ci-artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+
+  forward:
+    name: Mojo forward references
+    runs-on: [self-hosted, linux, x64, nvidia, tier-1]
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install pixi and restore cache
+        uses: prefix-dev/setup-pixi@fef5c9568ca6c4ff7707bf840ab0692ba3f08293  # v0.9.0
+        with:
+          pixi-version: ${{ env.PIXI_VERSION }}
+          manifest-path: gsplat/mojoproject.toml
+          cache: true
+          locked: true
+
+      - name: Record GPU and Mojo environment
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ci-artifacts
+          nvidia-smi -q > ci-artifacts/nvidia-smi.txt
+          pixi run --manifest-path gsplat/mojoproject.toml mojo --version \
+            > ci-artifacts/mojo-version.txt
+
+      - name: Run synthetic forward reference checks
+        working-directory: gsplat
+        shell: bash
+        run: |
+          set -euo pipefail
+          pixi run forward 2>&1 | tee ../ci-artifacts/forward.log
+
+      - name: Upload forward logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: tier1-forward-logs
+          path: ci-artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+
+  intersect:
+    name: Mojo intersect (radix vs bitonic)
+    runs-on: [self-hosted, linux, x64, nvidia, tier-1]
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install pixi and restore cache
+        uses: prefix-dev/setup-pixi@fef5c9568ca6c4ff7707bf840ab0692ba3f08293  # v0.9.0
+        with:
+          pixi-version: ${{ env.PIXI_VERSION }}
+          manifest-path: gsplat/mojoproject.toml
+          cache: true
+          locked: true
+
+      - name: Run intersection and independent sort checks
+        working-directory: gsplat
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ../ci-artifacts
+          nvidia-smi -L | tee ../ci-artifacts/nvidia-gpus.txt
+          pixi run intersect 2>&1 | tee ../ci-artifacts/intersect.log
+
+      - name: Upload intersection logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: tier1-intersect-logs
+          path: ci-artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+
+  render-ply:
+    name: Mojo render PLY (float64 reference)
+    runs-on: [self-hosted, linux, x64, nvidia, tier-1]
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install pixi and restore cache
+        uses: prefix-dev/setup-pixi@fef5c9568ca6c4ff7707bf840ab0692ba3f08293  # v0.9.0
+        with:
+          pixi-version: ${{ env.PIXI_VERSION }}
+          manifest-path: gsplat/mojoproject.toml
+          cache: true
+          locked: true
+
+      - name: Run real-scene float64 reference check
+        working-directory: gsplat
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ../ci-artifacts
+          nvidia-smi -q > ../ci-artifacts/nvidia-smi.txt
+          pixi run render-ply 2>&1 | tee ../ci-artifacts/render-ply.log
+
+      - name: Upload rendered image and logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: tier1-render-ply
+          path: |
+            render.ppm
+            ci-artifacts/
+          if-no-files-found: warn
+          retention-days: 7
+
+  python-gpu-smoke:
+    name: Installed package GPU smoke
+    runs-on: [self-hosted, linux, x64, nvidia, tier-1]
+    timeout-minutes: 45
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6
+        with:
+          version: "0.12.5"
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+
+      - name: Install package and test dependencies
+        env:
+          UV_INDEX: https://whl.modular.com/nightly/simple/
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p ci-artifacts
+          uv sync --extra test 2>&1 | tee ci-artifacts/uv-sync.log
+
+      - name: Require CUDA and run GPU smoke test
+        shell: bash
+        run: |
+          set -euo pipefail
+          nvidia-smi -q > ci-artifacts/nvidia-smi.txt
+          uv run python -c \
+            'import torch; assert torch.cuda.is_available(), "CUDA is unavailable"'
+          uv run pytest -m gpu tests/test_gpu_smoke.py -vv \
+            2>&1 | tee ci-artifacts/gpu-smoke.log
+
+      - name: Upload GPU smoke logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4
+        with:
+          name: tier1-python-gpu-smoke-logs
+          path: ci-artifacts/
+          if-no-files-found: warn
+          retention-days: 7
