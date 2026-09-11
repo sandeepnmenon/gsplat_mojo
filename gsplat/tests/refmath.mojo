@@ -7,11 +7,22 @@ catch an error in `quat_to_rotmat`, `transpose` or `matmul3x3`.
 
 
 def _ref_rho2(
-    mx: Float32, my: Float32, mz: Float32,
-    qx: Float32, qy: Float32, qz: Float32, qw: Float32,
-    sx: Float32, sy: Float32, sz: Float32,
-    ox: Float32, oy: Float32, oz: Float32,
-    dx: Float32, dy: Float32, dz: Float32,
+    mx: Float32,
+    my: Float32,
+    mz: Float32,
+    qx: Float32,
+    qy: Float32,
+    qz: Float32,
+    qw: Float32,
+    sx: Float32,
+    sy: Float32,
+    sz: Float32,
+    ox: Float32,
+    oy: Float32,
+    oz: Float32,
+    dx: Float32,
+    dy: Float32,
+    dz: Float32,
 ) -> Tuple[Float32, Float32]:
     """Host reference for the ray/gaussian intersection.
 
@@ -66,11 +77,22 @@ def _ref_rho2(
 
 
 def _ref_rho2_f64(
-    mx: Float64, my: Float64, mz: Float64,
-    qx: Float64, qy: Float64, qz: Float64, qw: Float64,
-    sx: Float64, sy: Float64, sz: Float64,
-    ox: Float64, oy: Float64, oz: Float64,
-    dx: Float64, dy: Float64, dz: Float64,
+    mx: Float64,
+    my: Float64,
+    mz: Float64,
+    qx: Float64,
+    qy: Float64,
+    qz: Float64,
+    qw: Float64,
+    sx: Float64,
+    sy: Float64,
+    sz: Float64,
+    ox: Float64,
+    oy: Float64,
+    oz: Float64,
+    dx: Float64,
+    dy: Float64,
+    dz: Float64,
 ) -> Tuple[Float64, Float64]:
     """Float64 twin of `_ref_rho2`, used to size the float32 noise floor.
 

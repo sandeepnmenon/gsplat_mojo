@@ -14,3 +14,4 @@ package = "mojo precompile gsplat_kernels -o gsplat_kernels.mojoc -I ."
 
 [dependencies]
 max = "*"
+mojo = "*"

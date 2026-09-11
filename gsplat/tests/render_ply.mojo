@@ -83,10 +83,22 @@ comptime OUT_PATH = "../render.ppm"
 # Camera pose carried over from the original driver.py: a 10-degree tilt about
 # x, backed off along z. World -> camera, so x_cam = R x_world + t.
 comptime VR = SIMD[DTYPE, 16](
-    1.0, 0.0, 0.0,
-    0.0, 0.98480777, -0.17364819,
-    0.0, 0.17364819, 0.98480777,
-    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+    1.0,
+    0.0,
+    0.0,
+    0.0,
+    0.98480777,
+    -0.17364819,
+    0.0,
+    0.17364819,
+    0.98480777,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
+    0.0,
 )
 comptime VT = SIMD[DTYPE, 4](0.0, -0.86824093, 4.92403887, 0.0)
 
@@ -106,8 +118,15 @@ def main() raises:
     print("loading", PLY_PATH)
     var gs = load_ply(PLY_PATH)
     var n_gauss = gs.count
-    print("  gaussians:", n_gauss, "| SH degree", gs.sh_degree,
-          "(", gs.sh_coeffs, "coefficients )")
+    print(
+        "  gaussians:",
+        n_gauss,
+        "| SH degree",
+        gs.sh_degree,
+        "(",
+        gs.sh_coeffs,
+        "coefficients )",
+    )
     if n_gauss > N_MAX:
         raise Error(
             "PLY has more gaussians than N_MAX; raise the capacity in"
@@ -258,27 +277,53 @@ def main() raises:
     # Colour is view-dependent, so resolve the SH for this camera first; the
     # rasterizer then reads plain RGB and needs no knowledge of SH.
     ctx.enqueue_function[compute_colors_from_sh](
-        sh, means, viewmats0, colors,
-        Int32(n_gauss), Int32(gs.sh_degree),
-        grid_dim=(gblocks, C), block_dim=TPB,
+        sh,
+        means,
+        viewmats0,
+        colors,
+        Int32(n_gauss),
+        Int32(gs.sh_degree),
+        grid_dim=(gblocks, C),
+        block_dim=TPB,
     )
     ctx.enqueue_function[project_and_count](
-        means, scales, quats, opacities, viewmats0, ks,
-        counts, bboxes, depths,
-        Int32(n_gauss), Int32(N_TILES_X), Int32(N_TILES_Y), Int32(TILE),
-        grid_dim=(gblocks, C), block_dim=TPB,
+        means,
+        scales,
+        quats,
+        opacities,
+        viewmats0,
+        ks,
+        counts,
+        bboxes,
+        depths,
+        Int32(n_gauss),
+        Int32(N_TILES_X),
+        Int32(N_TILES_Y),
+        Int32(TILE),
+        grid_dim=(gblocks, C),
+        block_dim=TPB,
     )
     ctx.enqueue_function[scan_block](
-        counts_flat, offsets_flat, block_sums, Int32(C * N_MAX),
-        grid_dim=SCAN_NUM_BLOCKS, block_dim=SCAN_BLOCK,
+        counts_flat,
+        offsets_flat,
+        block_sums,
+        Int32(C * N_MAX),
+        grid_dim=SCAN_NUM_BLOCKS,
+        block_dim=SCAN_BLOCK,
     )
     ctx.enqueue_function[scan_block_sums](
-        block_sums, total, Int32(SCAN_NUM_BLOCKS),
-        grid_dim=1, block_dim=SCAN_WIDTH,
+        block_sums,
+        total,
+        Int32(SCAN_NUM_BLOCKS),
+        grid_dim=1,
+        block_dim=SCAN_WIDTH,
     )
     ctx.enqueue_function[add_block_offsets](
-        offsets_flat, block_sums, Int32(C * N_MAX),
-        grid_dim=SCAN_NUM_BLOCKS, block_dim=SCAN_BLOCK,
+        offsets_flat,
+        block_sums,
+        Int32(C * N_MAX),
+        grid_dim=SCAN_NUM_BLOCKS,
+        block_dim=SCAN_BLOCK,
     )
     ctx.enqueue_copy(dst_buf=total_h, src_buf=total_buf)
     ctx.synchronize()
@@ -300,7 +345,10 @@ def main() raises:
                     sh_vs_dc = d
     print("  SH-resolved vs order-0 colours: max diff", sh_vs_dc)
     if n_isects <= 0:
-        raise Error("nothing intersected the frame — is the camera pointed at the model?")
+        raise Error(
+            "nothing intersected the frame — is the camera pointed at the"
+            " model?"
+        )
 
     # Radix sorts exactly n elements -- no power-of-two padding needed.
     var n_rblocks = ceildiv(n_isects, RADIX_EPB)
@@ -323,37 +371,81 @@ def main() raises:
     var scratch = TileTensor(scratch_buf, layout_one)
 
     ctx.enqueue_function[emit_isects](
-        bboxes, depths, offsets, counts, keys, sorted_ids,
-        Int32(n_gauss), Int32(N_TILES_X), Int32(N_TILES),
-        grid_dim=(gblocks, C), block_dim=TPB,
+        bboxes,
+        depths,
+        offsets,
+        counts,
+        keys,
+        sorted_ids,
+        Int32(n_gauss),
+        Int32(N_TILES_X),
+        Int32(N_TILES),
+        grid_dim=(gblocks, C),
+        block_dim=TPB,
     )
     print("  radix sort:", RADIX_PASSES, "passes over", n_rblocks, "blocks")
     radix_sort_pairs(
-        ctx, keys, sorted_ids, keys_alt, vals_alt,
-        hist, hist_off, block_sums, scratch,
-        keys_buf, sorted_buf, keys_alt_buf, vals_alt_buf, n_isects,
+        ctx,
+        keys,
+        sorted_ids,
+        keys_alt,
+        vals_alt,
+        hist,
+        hist_off,
+        block_sums,
+        scratch,
+        keys_buf,
+        sorted_buf,
+        keys_alt_buf,
+        vals_alt_buf,
+        n_isects,
     )
     tileoff_buf.enqueue_fill(Int32(n_isects))
     ctx.enqueue_function[write_tile_offsets](
-        keys, tile_offsets_flat, Int32(n_isects),
-        grid_dim=ceildiv(n_isects, TPB), block_dim=TPB,
+        keys,
+        tile_offsets_flat,
+        Int32(n_isects),
+        grid_dim=ceildiv(n_isects, TPB),
+        block_dim=TPB,
     )
     renders_buf.enqueue_fill(0.0)
     alphas_buf.enqueue_fill(0.0)
     ids_buf.enqueue_fill(-1)
 
     ctx.enqueue_function[rasterize_to_pixels_from_world_3dgs_fwd](
-        Int32(C), Int32(n_gauss), Int32(n_isects), Int32(0),
-        means, quats, scales, colors, opacities, backgrounds, masks,
-        Int32(1), Int32(1),
-        Int32(IMG_W), Int32(IMG_H), Int32(TILE),
-        Int32(N_TILES_X), Int32(N_TILES_Y),
-        viewmats0, viewmats1, ks,
-        Int32(0), Int32(0),
-        radial, tangential, thin_prims,
-        tile_offsets, sorted_ids,
-        render_colors, render_alphas, last_ids,
-        grid_dim=(N_TILES_X, N_TILES_Y, C), block_dim=(TILE, TILE, 1),
+        Int32(C),
+        Int32(n_gauss),
+        Int32(n_isects),
+        Int32(0),
+        means,
+        quats,
+        scales,
+        colors,
+        opacities,
+        backgrounds,
+        masks,
+        Int32(1),
+        Int32(1),
+        Int32(IMG_W),
+        Int32(IMG_H),
+        Int32(TILE),
+        Int32(N_TILES_X),
+        Int32(N_TILES_Y),
+        viewmats0,
+        viewmats1,
+        ks,
+        Int32(0),
+        Int32(0),
+        radial,
+        tangential,
+        thin_prims,
+        tile_offsets,
+        sorted_ids,
+        render_colors,
+        render_alphas,
+        last_ids,
+        grid_dim=(N_TILES_X, N_TILES_Y, C),
+        block_dim=(TILE, TILE, 1),
     )
     ctx.enqueue_copy(dst_buf=tileoff_h, src_buf=tileoff_buf)
     ctx.synchronize()
@@ -383,9 +475,16 @@ def main() raises:
     out.close()
     print("  wrote", OUT_PATH)
     print(
-        "  coverage:", lit, "of", IMG_H * IMG_W, "px lit (",
-        Int(100.0 * Float32(lit) / Float32(IMG_H * IMG_W)), "% ) | mean alpha",
-        alpha_sum / Float32(IMG_H * IMG_W), "| max alpha", max_alpha,
+        "  coverage:",
+        lit,
+        "of",
+        IMG_H * IMG_W,
+        "px lit (",
+        Int(100.0 * Float32(lit) / Float32(IMG_H * IMG_W)),
+        "% ) | mean alpha",
+        alpha_sum / Float32(IMG_H * IMG_W),
+        "| max alpha",
+        max_alpha,
     )
 
     # ---- sampled verification -------------------------------------------
@@ -438,17 +537,28 @@ def main() raises:
                     for i in range(start, end):
                         var g = Int(sid[i])
                         var res = _ref_rho2(
-                            gs.means[g * 3], gs.means[g * 3 + 1], gs.means[g * 3 + 2],
-                            gs.quats[g * 4], gs.quats[g * 4 + 1],
-                            gs.quats[g * 4 + 2], gs.quats[g * 4 + 3],
-                            gs.scales[g * 3], gs.scales[g * 3 + 1], gs.scales[g * 3 + 2],
-                            cam_x, cam_y, cam_z,
-                            dwx, dwy, dwz,
+                            gs.means[g * 3],
+                            gs.means[g * 3 + 1],
+                            gs.means[g * 3 + 2],
+                            gs.quats[g * 4],
+                            gs.quats[g * 4 + 1],
+                            gs.quats[g * 4 + 2],
+                            gs.quats[g * 4 + 3],
+                            gs.scales[g * 3],
+                            gs.scales[g * 3 + 1],
+                            gs.scales[g * 3 + 2],
+                            cam_x,
+                            cam_y,
+                            cam_z,
+                            dwx,
+                            dwy,
+                            dwz,
                         )
                         if res[1] <= 0.0:
                             continue
                         var a = min(
-                            Float32(MAX_ALPHA), gs.opacities[g] * exp(-0.5 * res[0])
+                            Float32(MAX_ALPHA),
+                            gs.opacities[g] * exp(-0.5 * res[0]),
                         )
                         # how close is this gaussian to a decision boundary?
                         if abs(a - Float32(MIN_ALPHA)) < 1e-5:
@@ -467,14 +577,22 @@ def main() raises:
 
                         # the same walk in float64
                         var r64 = _ref_rho2_f64(
-                            Float64(gs.means[g * 3]), Float64(gs.means[g * 3 + 1]),
+                            Float64(gs.means[g * 3]),
+                            Float64(gs.means[g * 3 + 1]),
                             Float64(gs.means[g * 3 + 2]),
-                            Float64(gs.quats[g * 4]), Float64(gs.quats[g * 4 + 1]),
-                            Float64(gs.quats[g * 4 + 2]), Float64(gs.quats[g * 4 + 3]),
-                            Float64(gs.scales[g * 3]), Float64(gs.scales[g * 3 + 1]),
+                            Float64(gs.quats[g * 4]),
+                            Float64(gs.quats[g * 4 + 1]),
+                            Float64(gs.quats[g * 4 + 2]),
+                            Float64(gs.quats[g * 4 + 3]),
+                            Float64(gs.scales[g * 3]),
+                            Float64(gs.scales[g * 3 + 1]),
                             Float64(gs.scales[g * 3 + 2]),
-                            Float64(cam_x), Float64(cam_y), Float64(cam_z),
-                            Float64(dwx), Float64(dwy), Float64(dwz),
+                            Float64(cam_x),
+                            Float64(cam_y),
+                            Float64(cam_z),
+                            Float64(dwx),
+                            Float64(dwy),
+                            Float64(dwz),
                         )
                         var a64 = min(
                             Float64(MAX_ALPHA),
@@ -485,7 +603,9 @@ def main() raises:
                             if nt64 >= Float64(T_EPS):
                                 comptime for kk in range(CDIM):
                                     acc64[kk] += (
-                                        a64 * tr64 * Float64(colors_view[g * CDIM + kk])
+                                        a64
+                                        * tr64
+                                        * Float64(colors_view[g * CDIM + kk])
                                     )
                                 tr64 = nt64
 
@@ -533,25 +653,40 @@ def main() raises:
                         n_near += 1
 
     print(
-        "  sampled check:", checked, "px (", checked_lit,
-        "with coverage ) | longest chain", longest,
+        "  sampled check:",
+        checked,
+        "px (",
+        checked_lit,
+        "with coverage ) | longest chain",
+        longest,
     )
     print(
-        "  max |GPU      - float64 truth|", worst,
-        "  mean", Float32(err_sum / Float64(checked)),
+        "  max |GPU      - float64 truth|",
+        worst,
+        "  mean",
+        Float32(err_sum / Float64(checked)),
     )
     print(
-        "  max |host f32 - float64 truth|", worst_f32ref,
-        "  mean", Float32(err_sum_f32 / Float64(checked)),
+        "  max |host f32 - float64 truth|",
+        worst_f32ref,
+        "  mean",
+        Float32(err_sum_f32 / Float64(checked)),
         "  <- float32 noise floor",
     )
     print(
-        "  (", bad, "px over", SAMPLE_TOL, "in absolute terms;", bad_near,
+        "  (",
+        bad,
+        "px over",
+        SAMPLE_TOL,
+        "in absolute terms;",
+        bad_near,
         "of those sit on a MIN_ALPHA/T_EPS boundary )",
     )
     print(
-        "  longest composite chain", longest,
-        "| worst-case chain", worst_chain,
+        "  longest composite chain",
+        longest,
+        "| worst-case chain",
+        worst_chain,
     )
     # These gaussians are ~1e-3 across and ~5 units away, so the intersection
     # ends in a near-total cancellation and a float32 evaluation of it is
@@ -563,11 +698,17 @@ def main() raises:
     var ok = worst <= 1.5 * floor and lit > 0 and checked_lit > 0
     if ok:
         print(
-            "PASS: PLY render is within the float32 noise floor of the"
-            " independent reference on all", checked, "sampled pixels"
+            (
+                "PASS: PLY render is within the float32 noise floor of the"
+                " independent reference on all"
+            ),
+            checked,
+            "sampled pixels",
         )
     else:
         raise Error(
-            String("FAIL: GPU error ") + String(worst)
-            + " exceeds 1.5x the float32 floor " + String(floor)
+            String("FAIL: GPU error ")
+            + String(worst)
+            + " exceeds 1.5x the float32 floor "
+            + String(floor)
         )

@@ -247,7 +247,7 @@ def scan_block(
     var gid = Int(block_idx.x) * SCAN_BLOCK + tid
     var n = Int(n_items)
 
-    var sh = stack_allocation[IDTYPE, address_space = AddressSpace.SHARED](
+    var sh = stack_allocation[IDTYPE, address_space=AddressSpace.SHARED](
         row_major[SCAN_BLOCK]()
     )
     var mine: Int32 = 0
@@ -284,7 +284,7 @@ def scan_block_sums(
     var tid = Int(thread_idx.x)
     var nb = Int(n_blocks)
 
-    var sh = stack_allocation[IDTYPE, address_space = AddressSpace.SHARED](
+    var sh = stack_allocation[IDTYPE, address_space=AddressSpace.SHARED](
         row_major[SCAN_WIDTH]()
     )
     var mine: Int32 = 0
@@ -382,7 +382,7 @@ def radix_histogram(
     var blk = Int(block_idx.x)
     var n = Int(n_items)
 
-    var sh = stack_allocation[IDTYPE, address_space = AddressSpace.SHARED](
+    var sh = stack_allocation[IDTYPE, address_space=AddressSpace.SHARED](
         layout_radix_sh
     )
     comptime for d in range(RADIX):
@@ -431,7 +431,7 @@ def radix_scatter(
     var blk = Int(block_idx.x)
     var n = Int(n_items)
 
-    var sh = stack_allocation[IDTYPE, address_space = AddressSpace.SHARED](
+    var sh = stack_allocation[IDTYPE, address_space=AddressSpace.SHARED](
         layout_radix_sh
     )
     comptime for d in range(RADIX):
@@ -510,39 +510,73 @@ def radix_sort_pairs(
         var shift = Int32(p * RADIX_BITS)
         if parity == 0:
             ctx.enqueue_function[radix_histogram](
-                keys_a, hist, Int32(n_isects), shift, Int32(n_blocks),
-                grid_dim=n_blocks, block_dim=RADIX_TPB,
+                keys_a,
+                hist,
+                Int32(n_isects),
+                shift,
+                Int32(n_blocks),
+                grid_dim=n_blocks,
+                block_dim=RADIX_TPB,
             )
         else:
             ctx.enqueue_function[radix_histogram](
-                keys_b, hist, Int32(n_isects), shift, Int32(n_blocks),
-                grid_dim=n_blocks, block_dim=RADIX_TPB,
+                keys_b,
+                hist,
+                Int32(n_isects),
+                shift,
+                Int32(n_blocks),
+                grid_dim=n_blocks,
+                block_dim=RADIX_TPB,
             )
 
         ctx.enqueue_function[scan_block](
-            hist, hist_off, block_sums, Int32(hist_size),
-            grid_dim=scan_blocks, block_dim=SCAN_BLOCK,
+            hist,
+            hist_off,
+            block_sums,
+            Int32(hist_size),
+            grid_dim=scan_blocks,
+            block_dim=SCAN_BLOCK,
         )
         ctx.enqueue_function[scan_block_sums](
-            block_sums, scratch, Int32(scan_blocks),
-            grid_dim=1, block_dim=SCAN_WIDTH,
+            block_sums,
+            scratch,
+            Int32(scan_blocks),
+            grid_dim=1,
+            block_dim=SCAN_WIDTH,
         )
         ctx.enqueue_function[add_block_offsets](
-            hist_off, block_sums, Int32(hist_size),
-            grid_dim=scan_blocks, block_dim=SCAN_BLOCK,
+            hist_off,
+            block_sums,
+            Int32(hist_size),
+            grid_dim=scan_blocks,
+            block_dim=SCAN_BLOCK,
         )
 
         if parity == 0:
             ctx.enqueue_function[radix_scatter](
-                keys_a, vals_a, keys_b, vals_b, hist_off,
-                Int32(n_isects), shift, Int32(n_blocks),
-                grid_dim=n_blocks, block_dim=RADIX_TPB,
+                keys_a,
+                vals_a,
+                keys_b,
+                vals_b,
+                hist_off,
+                Int32(n_isects),
+                shift,
+                Int32(n_blocks),
+                grid_dim=n_blocks,
+                block_dim=RADIX_TPB,
             )
         else:
             ctx.enqueue_function[radix_scatter](
-                keys_b, vals_b, keys_a, vals_a, hist_off,
-                Int32(n_isects), shift, Int32(n_blocks),
-                grid_dim=n_blocks, block_dim=RADIX_TPB,
+                keys_b,
+                vals_b,
+                keys_a,
+                vals_a,
+                hist_off,
+                Int32(n_isects),
+                shift,
+                Int32(n_blocks),
+                grid_dim=n_blocks,
+                block_dim=RADIX_TPB,
             )
         parity = 1 - parity
 
